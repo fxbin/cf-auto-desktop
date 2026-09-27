@@ -346,3 +346,61 @@ def test_cfst_download_fails_if_digest_missing():
             except ValueError as exc:
                 assert "digest" in str(exc).lower() or "sha256" in str(exc).lower()
         assert not (wd / "cfst-bundle").exists()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ProviderServer 多端点（B · 外壳 clash-auto.yaml 也走 URL 订阅）
+# ─────────────────────────────────────────────────────────────────────────────
+def test_provider_serves_both_endpoints_and_rejects_unknown():
+    """clash-auto.yaml 与 cf-proxies.yaml 都通过 token 暴露；未知路径 404。"""
+    with tempfile.TemporaryDirectory() as t:
+        wd, _ = sample_setup(Path(t))
+        state = engine.load_state(wd)
+        token = state["token"]
+
+        # 端口可能被占用，跳过则返回
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", engine.PORT)) == 0:
+                return
+
+        srv = engine.ProviderServer(wd)
+        srv.start()
+        try:
+            # candidates（原有）
+            url_c = f"http://127.0.0.1:{engine.PORT}/{token}/cf-proxies.yaml"
+            with urllib.request.urlopen(url_c, timeout=2) as r:
+                data = yaml.safe_load(r.read())
+                assert len(data["proxies"]) == 2
+
+            # config 外壳（B 新增）
+            url_m = f"http://127.0.0.1:{engine.PORT}/{token}/clash-auto.yaml"
+            with urllib.request.urlopen(url_m, timeout=2) as r:
+                cfg = yaml.safe_load(r.read())
+                assert "proxy-groups" in cfg
+                assert engine.PROVIDER in cfg.get("proxy-providers", {})
+
+            # .yml 别名
+            url_alias = f"http://127.0.0.1:{engine.PORT}/{token}/clash-auto.yml"
+            with urllib.request.urlopen(url_alias, timeout=2) as r:
+                cfg2 = yaml.safe_load(r.read())
+                assert cfg2.get("proxy-groups") == cfg.get("proxy-groups")
+
+            # 无 token 404
+            for bad in (
+                f"http://127.0.0.1:{engine.PORT}/cf-proxies.yaml",
+                f"http://127.0.0.1:{engine.PORT}/{token}/secret.yaml",
+                f"http://127.0.0.1:{engine.PORT}/wrong-token/clash-auto.yaml",
+            ):
+                try:
+                    urllib.request.urlopen(bad, timeout=2)
+                    assert False, f"should 404: {bad}"
+                except urllib.error.HTTPError as ex:
+                    assert ex.code == 404
+
+            # provider_urls 辅助
+            urls = engine.provider_urls(wd)
+            assert urls["candidates"].endswith("/cf-proxies.yaml")
+            assert urls["config"].endswith("/clash-auto.yaml")
+            assert token in urls["config"]
+        finally:
+            srv.stop()

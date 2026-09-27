@@ -409,6 +409,7 @@ class MainWindow(QMainWindow):
 
         utilities = QHBoxLayout()
         utilities.setSpacing(8)
+        utilities.addWidget(self._button("复制订阅 URL", self._copy_subscribe_url, "ghost", min_w=130))
         utilities.addWidget(self._button("打开生成的配置", self._open_config, "quiet", min_w=130))
         utilities.addWidget(self._button("回滚节点池", self._rollback, "quiet", min_w=110))
         utilities.addWidget(self._button("打开工作目录", self._open_folder, "quiet", min_w=120))
@@ -626,7 +627,11 @@ class MainWindow(QMainWindow):
     def _set_config_label(self, node_name: str, domain: str | None) -> None:
         """UI 上不显示真实 SNI 域名（截图/演示会泄露）；完整信息只放 tooltip。"""
         shown = f"已生成：{node_name}"
-        tip = f"节点：{node_name}\nSNI 域名：{domain or '（未知）'}"
+        urls = engine.provider_urls(self.workdir)
+        tip_lines = [f"节点：{node_name}", f"SNI 域名：{domain or '（未知）'}"]
+        if urls.get("config"):
+            tip_lines.append(f"订阅 URL（推荐）：{urls['config']}")
+        tip = "\n".join(tip_lines)
         self.config_label.setText(shown)
         self.config_label.setToolTip(tip)
 
@@ -781,7 +786,13 @@ class MainWindow(QMainWindow):
             path = engine.setup(self.workdir, self.config_path, self.nodes.currentText())
             self._start_provider()
             self._log("已生成：" + str(path))
-            self._log("请将该文件作为新配置导入 Clash Party，并选择「CF动态容灾」。")
+            urls = engine.provider_urls(self.workdir)
+            if urls.get("config"):
+                self._log("推荐：在 Clash Party 选「订阅 / 导入 URL」，粘贴下方链接（外层配置会自动更新）：")
+                self._log(f"  {urls['config']}")
+            self._log("备选：也可在 Clash Party 手动导入生成的 clash-auto.yaml（外层配置一次性复制）。")
+            self._log("候选池（cf-proxies.yaml）始终走 HTTP，无需重导入，Clash 每 60s 拉取。")
+            self._log("导入后在 Clash Party 里选「CF动态容灾」。")
             if engine.read_prefs(self.workdir).get("cfst") and engine.read_prefs(self.workdir).get("auto_scan"):
                 QTimer.singleShot(900, self._start_scan)
             QMessageBox.information(self, "已生成", f"新配置位置：\n{path}\n\n"
@@ -893,6 +904,17 @@ class MainWindow(QMainWindow):
             subprocess.Popen(["open", str(self.workdir)])
         else:
             self._log("工作目录：" + str(self.workdir))
+
+    def _copy_subscribe_url(self):
+        urls = engine.provider_urls(self.workdir)
+        url = urls.get("config") if urls else None
+        if not url:
+            self._log("请先生成 Clash 配置。")
+            return
+        QApplication.clipboard().setText(url)
+        self._log("订阅 URL 已复制到剪贴板：")
+        self._log(f"  {url}")
+        self._log("→ 在 Clash Party 选「订阅 / 导入 URL」粘贴即可；外层配置变化会自动刷新。")
 
     def _open_config(self):
         path = self.workdir / "clash-auto.yaml"

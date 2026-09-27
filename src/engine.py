@@ -603,7 +603,13 @@ def rollback(workdir: Path) -> bool:
 
 
 class ProviderServer:
-    """Bound to loopback only, serves a random-token URL. No external requests."""
+    """Bound to loopback only, serves a random-token URL. No external requests.
+
+    端点：
+      GET /<token>/cf-proxies.yaml    → 动态候选池（供 proxy-providers 每 60s 拉取）
+      GET /<token>/clash-auto.yaml    → 完整外壳（供 Clash Party 以「订阅 URL」导入）
+      GET /<token>/clash-auto.yml     → 别名
+    """
     def __init__(self, workdir: Path):
         self.workdir = workdir
         self.httpd = None
@@ -611,21 +617,29 @@ class ProviderServer:
 
     def start(self):
         state = load_state(self.workdir)
-        filename = self.workdir / "cf-proxies.yaml"
         token = state["token"]
-        wanted = f"/{token}/cf-proxies.yaml"
+
+        # 端点 → 文件 映射（都要求精确路径，拒绝子串命中）
+        routes = {
+            f"/{token}/cf-proxies.yaml": self.workdir / "cf-proxies.yaml",
+            f"/{token}/clash-auto.yaml": self.workdir / "clash-auto.yaml",
+            f"/{token}/clash-auto.yml":  self.workdir / "clash-auto.yaml",
+        }
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                if urllib.parse.urlsplit(self.path).path != wanted:
+                path = urllib.parse.urlsplit(self.path).path
+                target = routes.get(path)
+                if target is None:
                     self.send_error(404)
                     return
                 try:
-                    data = filename.read_bytes()
+                    data = target.read_bytes()
                 except OSError:
                     self.send_error(503)
                     return
                 self.send_response(200)
+                # Clash Party 的「订阅 URL」拉取偏好 yaml mime；两种都给兼容
                 self.send_header("Content-Type", "application/yaml; charset=utf-8")
                 self.send_header("Cache-Control", "private, no-store")
                 self.send_header("Content-Length", str(len(data)))
@@ -649,3 +663,17 @@ class ProviderServer:
             if self.thread:
                 self.thread.join(timeout=3)
                 self.thread = None
+
+
+def provider_urls(workdir: Path) -> dict:
+    """给 UI 用：返回当前 Provider 的三条 URL。"""
+    state = load_state(workdir, required=False)
+    if not state:
+        return {}
+    token = state["token"]
+    base = f"http://127.0.0.1:{PORT}/{token}"
+    return {
+        "candidates": f"{base}/cf-proxies.yaml",   # 动态候选池（内置 proxy-providers 用）
+        "config":     f"{base}/clash-auto.yaml",   # 完整配置（Clash 订阅 URL 用）
+        "base":       base,
+    }
