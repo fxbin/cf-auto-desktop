@@ -90,10 +90,41 @@ if [[ -d "$BUNDLE" ]]; then
     esac
   done
 
+  # ───────────────────────────────────────────────────────────────────
+  # Further safe trims (measured on Apple Silicon / macOS 26.6):
+  #   - Qt .qm translations: 96 files / 6.7 MB. App uses hardcoded CJK
+  #     strings (not Qt's tr()), so we don't need any translations.
+  #   - Qt plugins: keep only platforms (cocoa) + imageformats (png/jpeg)
+  #     + styles (qmacstyle). Drop tls / networkinformation / iconengines /
+  #     generic / platforminputcontexts / etc (~3 MB).
+  # DO NOT `strip` Mach-O binaries — measured to crash PySide6 / Python
+  # extension modules at startup. Only content-level removal is safe.
+  # ───────────────────────────────────────────────────────────────────
+  TRANS="$BUNDLE/Contents/Resources/PySide6/Qt/translations"
+  if [ -d "$TRANS" ]; then
+    find "$TRANS" -type f -name '*.qm' -delete
+    find "$TRANS" -type d -empty -delete 2>/dev/null || true
+  fi
+  PLUG="$BUNDLE/Contents/Frameworks/PySide6/Qt/plugins"
+  if [ -d "$PLUG" ]; then
+    find "$PLUG" -mindepth 1 -maxdepth 1 -type d \
+      ! -name platforms ! -name imageformats ! -name styles \
+      -exec rm -rf {} +
+    if [ -d "$PLUG/imageformats" ]; then
+      find "$PLUG/imageformats" -type f \
+        ! -name 'libqjpeg*' ! -name 'libqpng*' -delete
+    fi
+    if [ -d "$PLUG/styles" ]; then
+      find "$PLUG/styles" -type f ! -name 'libqmacstyle*' -delete
+    fi
+  fi
+
   SIZE=$(du -sh "$BUNDLE" | awk '{print $1}')
   printf '\n打包完成：%s\n实际体积：%s（对比：未瘦身前 PySide6 全量约 1.2 GB）\n' "$PWD/$BUNDLE" "$SIZE"
   echo '保留 Qt 子模块：'
   du -sh "$QTLIB/"*.framework 2>/dev/null | sort -h | sed 's|.*/||'
+  echo '保留 Qt 插件目录：'
+  ls "$PLUG" 2>/dev/null | sed 's/^/  /'
 else
   printf '\n打包完成：%s/dist/\n' "$PWD"
 fi
