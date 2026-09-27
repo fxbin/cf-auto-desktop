@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CF Auto Desktop</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-titles">
+        <h1 class="title">CF Auto Desktop</h1>
+        <p class="subtitle">Cloudflare 候选动态优选 · Clash Party 节点池</p>
+      </div>
+      <div class="status-pill status-ok" id="status-pill">● 待配置</div>
+    </header>
+
+    <!-- Card 1 · 配置源 -->
+    <section class="card">
+      <div class="card-head">
+        <div class="step-badge">1</div>
+        <h2 class="card-title">配置源 · 原始 Clash YAML</h2>
+      </div>
+      <div class="row">
+        <div class="muted grow">未导入（文件需含真实 UUID，本工具不上传）</div>
+        <button class="btn ghost" id="btn-import-yaml">导入 YAML</button>
+      </div>
+      <div class="row">
+        <label class="muted">原节点</label>
+        <select class="select grow" id="node-select">
+          <option>—</option>
+        </select>
+        <button class="btn primary" id="btn-generate">生成 Clash 配置</button>
+      </div>
+    </section>
+
+    <!-- Card 2 · 测速工具 -->
+    <section class="card">
+      <div class="card-head">
+        <div class="step-badge">2</div>
+        <h2 class="card-title">测速工具 · CloudflareSpeedTest</h2>
+      </div>
+      <div class="row">
+        <div class="muted grow" id="cfst-label">未安装（可一键下载官方版，或手动导入你信任的 cfst）</div>
+        <button class="btn primary" id="btn-download-cfst">一键下载官方 cfst</button>
+        <button class="btn ghost" id="btn-import-cfst">手动导入</button>
+      </div>
+    </section>
+
+    <!-- Card 3 · 扫描设置 -->
+    <section class="card">
+      <div class="card-head">
+        <div class="step-badge">3</div>
+        <h2 class="card-title">扫描设置</h2>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="auto-scan" checked> 定时扫描并自动更新候选池</label>
+      </div>
+      <div class="row">
+        <label class="muted">扫描间隔</label>
+        <select class="select" id="interval">
+          <option>每 3 小时</option>
+          <option selected>每 6 小时</option>
+          <option>每 12 小时</option>
+          <option>每 24 小时</option>
+        </select>
+        <span class="spacer-18"></span>
+        <label class="muted">扫描强度</label>
+        <select class="select" id="scan-mode">
+          <option value="standard" selected>标准（更全面）</option>
+          <option value="light">轻量（省电省流量）</option>
+        </select>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="login-start"> 登录 Mac 后自动启动（菜单栏常驻）</label>
+      </div>
+    </section>
+
+    <!-- Card 4 · 手动操作 -->
+    <section class="card">
+      <div class="card-head">
+        <div class="step-badge">4</div>
+        <h2 class="card-title">手动操作</h2>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="btn-scan">立即扫描并应用</button>
+        <button class="btn ghost" id="btn-preview">仅预览结果</button>
+        <button class="btn ghost" id="btn-stop" disabled>停止扫描</button>
+      </div>
+      <div class="row">
+        <button class="btn ghost" id="btn-copy-url">复制订阅 URL</button>
+        <button class="btn quiet" id="btn-open-config">打开生成的配置</button>
+        <button class="btn quiet" id="btn-rollback">回滚节点池</button>
+        <button class="btn quiet" id="btn-open-folder">打开工作目录</button>
+      </div>
+    </section>
+
+    <!-- Log panel -->
+    <div class="log-head">
+      <div class="section-title">运行日志</div>
+      <div class="muted">不显示 UUID · 仅本地</div>
+    </div>
+    <pre class="log-panel" id="log-panel">22:12:00  Go 侧启动（PoC · 阶段 1）
+22:12:00  Wails v2 + WKWebView · 设计 token 已平移
+22:12:00  等待 Go 后端 engine 平移（阶段 2）
+</pre>
+
+    <footer class="footer">
+      Provider 仅监听 127.0.0.1，URL 带随机令牌 · 配置不上传 · 测速时建议让 cfst 与本工具直连以避开 Clash Party 的 TUN
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

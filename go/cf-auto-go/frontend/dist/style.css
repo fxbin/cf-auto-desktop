@@ -1,0 +1,254 @@
+/* ─────────────────────────────────────────────────────────────────────
+ * CF Auto Desktop · Wails 前端
+ * Design tokens 直接从 src/app.py:T 平移（ChatGPT / OpenAI 风格）
+ * ───────────────────────────────────────────────────────────────────── */
+
+:root {
+  --canvas:       #F9F9F9;
+  --surface:      #FFFFFF;
+  --surface-alt:  #F0F0F0;
+  --ink:          #0D0D0D;
+  --ink-muted:    #6B7280;
+  --ink-faint:    #9CA3AF;
+  --border:       #E5E5E5;
+  --border-str:   #D4D4D4;
+  --primary:      #0D0D0D;
+  --primary-hv:   #262626;
+  --primary-dk:   #000000;
+  --green:        #10A37F;
+  --green-soft:   #E6F4EF;
+  --warn:         #D97706;
+  --warn-soft:    #FEF3C7;
+  --danger:       #DC2626;
+  --danger-soft:  #FEE2E2;
+  --log-bg:       #1A1A1A;
+  --log-ink:      #E5E5E5;
+  --log-dim:      #8A8A8A;
+  --radius-card:  12px;
+  --radius-pill:  999px;
+  --radius-in:    8px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: ".AppleSystemUIFont", "SF Pro Text", "PingFang SC",
+               "Helvetica Neue", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  padding: 22px 28px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 100vh;
+}
+
+/* ── Header ───────────────────────────────────────────────────────── */
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.header-titles { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+.subtitle {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.status-pill {
+  height: 26px;
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  display: inline-flex;
+  align-items: center;
+}
+.status-ok   { background: var(--green-soft);  color: var(--green); }
+.status-busy { background: var(--warn-soft);   color: var(--warn); }
+.status-err  { background: var(--danger-soft); color: var(--danger); }
+.status-idle { background: var(--surface-alt); color: var(--ink-faint); }
+
+/* ── Card ─────────────────────────────────────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.step-badge {
+  width: 22px;
+  height: 22px;
+  background: var(--surface-alt);
+  color: var(--ink-muted);
+  border-radius: 11px;
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.card-title {
+  font-size: 14px;
+  font-weight: 550;
+}
+
+/* ── Rows & elements ─────────────────────────────────────────────── */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.grow { flex: 1; }
+.spacer-18 { width: 18px; }
+
+.muted { color: var(--ink-muted); font-size: 12px; }
+
+/* ── Buttons: three tiers ───────────────────────────────────────── */
+.btn {
+  border: 1px solid transparent;
+  border-radius: var(--radius-in);
+  padding: 9px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  min-height: 38px;
+  font-family: inherit;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.btn.primary {
+  background: var(--primary);
+  color: #FFFFFF;
+  border-radius: var(--radius-pill);
+  padding: 10px 18px;
+  font-weight: 550;
+}
+.btn.primary:hover   { background: var(--primary-hv); }
+.btn.primary:active  { background: var(--primary-dk); }
+
+.btn.ghost {
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border-str);
+}
+.btn.ghost:hover   { background: var(--surface-alt); }
+.btn.ghost:active  { background: var(--border); }
+
+.btn.quiet {
+  background: transparent;
+  color: var(--ink-muted);
+  border: 1px solid transparent;
+  padding: 7px 12px;
+  font-size: 12px;
+}
+.btn.quiet:hover {
+  background: var(--surface-alt);
+  color: var(--ink);
+}
+
+/* ── Inputs ─────────────────────────────────────────────────────── */
+.select {
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border-str);
+  border-radius: var(--radius-in);
+  padding: 7px 10px;
+  min-height: 38px;
+  font-family: inherit;
+  font-size: 13px;
+}
+.select:hover  { border-color: var(--ink-faint); }
+.select:focus  { border-color: var(--ink); outline: none; }
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+/* ── Log panel ──────────────────────────────────────────────────── */
+.log-head {
+  display: flex;
+  align-items: center;
+}
+.section-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-muted);
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.log-panel {
+  background: var(--log-bg);
+  color: var(--log-ink);
+  border: 1px solid #2A2A2A;
+  border-radius: 10px;
+  padding: 12px;
+  font-family: "SF Mono", Menlo, Monaco, "Cascadia Code", monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  min-height: 120px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.log-panel::-webkit-scrollbar { width: 10px; }
+.log-panel::-webkit-scrollbar-thumb {
+  background: var(--border-str);
+  border-radius: 5px;
+}
+.log-panel::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); }
+
+/* ── Footer ─────────────────────────────────────────────────────── */
+.footer {
+  font-size: 11px;
+  color: var(--ink-faint);
+  padding-top: 2px;
+}
+
+/* ── Scrollbar (page) ──────────────────────────────────────────── */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-str);
+  border-radius: 5px;
+  min-height: 24px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); }
+::-webkit-scrollbar-track { background: transparent; }

@@ -8,11 +8,15 @@ __pycache__/
 .ruff_cache/
 
 # Build / packaging
-dist/
-build/
+/dist/
+/build/
 *.spec
 *.dmg
 *.app
+
+# Wails (go/cf-auto-go): track source & metadata, ignore output
+/go/cf-auto-go/build/bin/
+/go/cf-auto-go/frontend/wailsjs/
 
 # IDE / OS
 .DS_Store
