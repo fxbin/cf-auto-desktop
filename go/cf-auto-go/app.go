@@ -64,6 +64,39 @@ func (a *App) workdir() (string, error) {
 	return engine.AppHome()
 }
 
+// Confirm 弹系统 Yes/No 对话框（WKWebView 的 window.confirm 不可靠，走 Wails 原生）。
+func (a *App) Confirm(title, message string) (bool, error) {
+	if a.ctx == nil {
+		return false, fmt.Errorf("app not ready")
+	}
+	res, err := wailsruntime.MessageDialog(a.ctx, wailsruntime.MessageDialogOptions{
+		Type:          wailsruntime.QuestionDialog,
+		Title:         title,
+		Message:       message,
+		Buttons:       []string{"确认", "取消"},
+		DefaultButton: "确认",
+		CancelButton:  "取消",
+	})
+	if err != nil {
+		return false, err
+	}
+	return res == "确认", nil
+}
+
+// Alert 弹系统信息对话框。
+func (a *App) Alert(title, message string) error {
+	if a.ctx == nil {
+		return fmt.Errorf("app not ready")
+	}
+	_, err := wailsruntime.MessageDialog(a.ctx, wailsruntime.MessageDialogOptions{
+		Type:    wailsruntime.InfoDialog,
+		Title:   title,
+		Message: message,
+		Buttons: []string{"好"},
+	})
+	return err
+}
+
 // ── 状态 / 配置查询 ─────────────────────────────────────────────────────
 
 // GetStatus 供前端启动时读取 UI 初值。

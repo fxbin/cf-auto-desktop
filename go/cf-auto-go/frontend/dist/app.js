@@ -90,7 +90,8 @@ EventsOn('scan-failed', (data) => {
 // ── 事件绑定 ────────────────────────────────────────────────────────────
 bind('btn-import-yaml', async () => {
   const A = App();
-  if (!A) return log('（PoC）导入 YAML 需 Wails 后端');
+  log('→ 点击「导入 YAML」');
+  if (!A) return log('Wails 后端未就绪');
   try {
     const path = await A.OpenYAMLDialog();
     if (!path) {
@@ -127,7 +128,8 @@ bind('btn-import-yaml', async () => {
 
 bind('btn-generate', async () => {
   const A = App();
-  if (!A) return log('（PoC）生成配置需 Wails 后端');
+  log('→ 点击「生成 Clash 配置」');
+  if (!A) return log('Wails 后端未就绪');
   const yamlPath = window.__yamlPath;
   const node = document.getElementById('node-select').value;
   if (!yamlPath) {
@@ -154,14 +156,22 @@ bind('btn-generate', async () => {
 
 bind('btn-download-cfst', async () => {
   const A = App();
-  if (!A) return log('（PoC）下载 cfst 需 Wails 后端');
-  if (!confirm('将从 GitHub 官方仓库 XIU2/CloudflareSpeedTest 的 Releases 下载 cfst。\n' +
-    '· 仅使用 HTTPS，并校验 GitHub 提供的 SHA256\n' +
-    '· 只解压 cfst 与 ip.txt，不执行任何脚本\n\n继续吗？')) return;
-  setBusy(true);
-  setStatus('下载 cfst 中…', 'busy');
-  log('开始下载官方 cfst…');
+  log('→ 点击「一键下载官方 cfst」');
+  if (!A) return log('Wails 后端未就绪');
   try {
+    const ok = await A.Confirm(
+      '下载官方 cfst',
+      '将从 GitHub 官方仓库 XIU2/CloudflareSpeedTest 的 Releases 下载 cfst。\n\n' +
+      '· 仅使用 HTTPS，并校验 GitHub 提供的 SHA256\n' +
+      '· 只解压 cfst 与 ip.txt，不执行任何脚本\n\n继续吗？'
+    );
+    if (!ok) {
+      log('已取消下载');
+      return;
+    }
+    setBusy(true);
+    setStatus('下载 cfst 中…', 'busy');
+    log('开始下载官方 cfst…');
     const r = await A.DownloadCfst();
     document.getElementById('cfst-label').textContent = `已安装 · ${r.path.split('/').slice(-2)[0]}`;
     setStatus('cfst 已安装', 'ok');
@@ -169,7 +179,7 @@ bind('btn-download-cfst', async () => {
   } catch (e) {
     setStatus('cfst 下载失败', 'err');
     log('下载失败：' + e);
-    alert('下载失败：' + e + '\n\n可改用「手动导入」。');
+    try { await A.Alert('下载失败', String(e) + '\n\n可改用「手动导入」。'); } catch {}
   } finally {
     setBusy(false);
   }
@@ -177,15 +187,19 @@ bind('btn-download-cfst', async () => {
 
 bind('btn-import-cfst', async () => {
   const A = App();
-  if (!A) return log('（PoC）手动导入需 Wails 后端');
+  log('→ 点击「手动导入」cfst');
+  if (!A) return log('Wails 后端未就绪');
   try {
     const path = await A.OpenCfstDialog();
     if (!path) {
       log('已取消选择');
       return;
     }
-    if (!confirm('仅导入你信任的 CloudflareSpeedTest 文件。\n' +
-      '应用会复制 cfst + ip.txt 到私有目录。继续吗？')) return;
+    const ok = await A.Confirm(
+      '导入测速程序',
+      '仅导入你信任的 CloudflareSpeedTest 文件。\n应用会复制 cfst + ip.txt 到私有目录。继续吗？'
+    );
+    if (!ok) return;
     const r = await A.ImportCfst(path);
     document.getElementById('cfst-label').textContent = `已安装 · ${r.path.split('/').slice(-2)[0]}`;
     log('手动导入完成');
@@ -269,9 +283,11 @@ bind('btn-open-config', async () => {
 
 bind('btn-rollback', async () => {
   const A = App();
-  if (!A) return log('（PoC）回滚需 Wails 后端');
-  if (!confirm('恢复上一次候选池吗？现有配置将备份。')) return;
+  log('→ 点击「回滚节点池」');
+  if (!A) return log('Wails 后端未就绪');
   try {
+    const ok = await A.Confirm('确认回滚', '恢复上一次候选池吗？现有配置将备份，可再次回滚切换。');
+    if (!ok) return;
     const r = await A.Rollback();
     log(r.rolled ? '回滚完成。' : '尚无可回滚历史。');
   } catch (e) {
