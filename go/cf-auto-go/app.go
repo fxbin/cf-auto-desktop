@@ -3,38 +3,349 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"sync"
+
+	"cf-auto-go/internal/engine"
+
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// App struct
+// App struct — Wails 绑定到前端 window.go.main.App.*
 type App struct {
-	ctx context.Context
+	ctx         context.Context
+	provider    *engine.ProviderServer
+	providerMu  sync.Mutex
+	scanStop    *engine.StopEvent
+	scanRunning bool
+	scanMu      sync.Mutex
 }
 
-// NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{}
 }
 
-// startup is called when the app starts
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 }
 
-// shutdown is called when the app is stopping
-func (a *App) shutdown(ctx context.Context) {}
+func (a *App) shutdown(ctx context.Context) {
+	a.providerMu.Lock()
+	if a.provider != nil {
+		a.provider.Stop()
+		a.provider = nil
+	}
+	a.providerMu.Unlock()
+}
 
-// Greet returns a greeting for the given name (PoC binding)
+// ── PoC bindings（保留以向后兼容） ────────────────────────────────────────
+
+// Greet returns a greeting for the given name.
 func (a *App) Greet(name string) string {
 	return fmt.Sprintf("Hello %s, from Go %s on %s/%s",
 		name, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
-// SystemInfo returns runtime info (PoC binding)
+// SystemInfo returns runtime info.
 func (a *App) SystemInfo() map[string]string {
 	return map[string]string{
 		"go":   runtime.Version(),
 		"os":   runtime.GOOS,
 		"arch": runtime.GOARCH,
+	}
+}
+
+// ── 桥接 helper ─────────────────────────────────────────────────────────
+
+func (a *App) workdir() (string, error) {
+	return engine.AppHome()
+}
+
+// ── 状态 / 配置查询 ─────────────────────────────────────────────────────
+
+// GetStatus 供前端启动时读取 UI 初值。
+func (a *App) GetStatus() map[string]any {
+	wd, err := a.workdir()
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	out := map[string]any{"workdir": wd}
+	if state, _ := engine.LoadState(wd, false); state != nil {
+		out["configured"] = true
+		out["node_name"] = state.NodeName
+		// 不把 domain / uuid 泄露给前端（隐私脱敏，与 Python 版一致）
+	} else {
+		out["configured"] = false
+	}
+	if prefs, _ := engine.ReadPrefs(wd); prefs.Cfst != "" {
+		out["cfst"] = filepath.Base(filepath.Dir(prefs.Cfst))
+		out["auto_scan"] = prefs.AutoScan
+		out["every_hours"] = prefs.EveryHours
+		out["scan_mode"] = prefs.ScanMode
+		out["last_status"] = prefs.LastStatus
+	} else {
+		out["cfst"] = ""
+	}
+	if urls, _ := engine.ProviderURLs(wd); urls != nil {
+		out["subscribe_url"] = urls["config"]
+		out["candidates_url"] = urls["candidates"]
+	}
+	return out
+}
+
+// CopySubscribeURL 返回订阅 URL（前端负责写剪贴板）。
+func (a *App) CopySubscribeURL() (string, error) {
+	wd, err := a.workdir()
+	if err != nil {
+		return "", err
+	}
+	urls, err := engine.ProviderURLs(wd)
+	if err != nil {
+		return "", err
+	}
+	if urls == nil {
+		return "", fmt.Errorf("请先生成 Clash 配置")
+	}
+	return urls["config"], nil
+}
+
+// ── YAML 导入 / 生成 ─────────────────────────────────────────────────────
+
+// ImportYAML 校验 YAML 并返回可选节点列表（前端后续调用 GenerateConfig）。
+func (a *App) ImportYAML(path string) (map[string]any, error) {
+	cfg, err := engine.LoadYAML(path)
+	if err != nil {
+		return nil, err
+	}
+	nodes := engine.EligibleNodes(cfg)
+	if len(nodes) == 0 {
+		return nil, fmt.Errorf("没有找到直接写在 proxies 中的 VLESS + WS + TLS 节点")
+	}
+	names := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		name, _ := n["name"].(string)
+		names = append(names, name)
+	}
+	// 优先 DNS 节点（非 IPv4）
+	preferred := ""
+	for _, n := range nodes {
+		srv := fmt.Sprint(n["server"])
+		if !engine.IPv4(srv) {
+			preferred, _ = n["name"].(string)
+			break
+		}
+	}
+	return map[string]any{
+		"nodes":     names,
+		"preferred": preferred,
+		"path":      path,
+	}, nil
+}
+
+// GenerateConfig 生成 clash-auto.yaml 并启动 Provider。
+func (a *App) GenerateConfig(yamlPath, nodeName string) (map[string]any, error) {
+	wd, err := a.workdir()
+	if err != nil {
+		return nil, err
+	}
+	out, err := engine.Setup(wd, yamlPath, nodeName)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.ensureProvider(); err != nil {
+		return nil, err
+	}
+	urls, _ := engine.ProviderURLs(wd)
+	return map[string]any{
+		"generated":     out,
+		"subscribe_url": urls["config"],
+	}, nil
+}
+
+func (a *App) ensureProvider() error {
+	a.providerMu.Lock()
+	defer a.providerMu.Unlock()
+	if a.provider != nil {
+		a.provider.Stop()
+	}
+	wd, err := a.workdir()
+	if err != nil {
+		return err
+	}
+	p := engine.NewProviderServer(wd)
+	if err := p.Start(); err != nil {
+		return err
+	}
+	a.provider = p
+	return nil
+}
+
+// ── cfst 下载 / 导入 ─────────────────────────────────────────────────────
+
+// DownloadCfst 官方下载；进度通过 runtime EventsEmit 推给前端。
+func (a *App) DownloadCfst() (map[string]any, error) {
+	wd, err := a.workdir()
+	if err != nil {
+		return nil, err
+	}
+	log := func(msg string) {
+		a.emitLog(msg)
+	}
+	progress := func(done, total int64) {
+		if total > 0 && done*10%total == 0 {
+			a.emitLog(fmt.Sprintf("下载中… %.1f/%.1f MB", float64(done)/1e6, float64(total)/1e6))
+		}
+	}
+	dest, err := engine.DownloadCfst(wd, log, progress, engine.NewStopEvent())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"path": dest}, nil
+}
+
+// ImportCfst 手动导入本地 cfst + ip.txt。
+func (a *App) ImportCfst(path string) (map[string]any, error) {
+	wd, err := a.workdir()
+	if err != nil {
+		return nil, err
+	}
+	dest, err := engine.ImportCfst(wd, path)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"path": dest}, nil
+}
+
+// ── 扫描 ───────────────────────────────────────────────────────────────
+
+// StartScan 后台扫描；完成后通过 EventsEmit 推送结果。
+func (a *App) StartScan(dryRun bool) (map[string]any, error) {
+	a.scanMu.Lock()
+	if a.scanRunning {
+		a.scanMu.Unlock()
+		return nil, fmt.Errorf("已有扫描在进行")
+	}
+	wd, err := a.workdir()
+	if err != nil {
+		a.scanMu.Unlock()
+		return nil, err
+	}
+	if state, _ := engine.LoadState(wd, false); state == nil {
+		a.scanMu.Unlock()
+		return nil, fmt.Errorf("请先生成 Clash 配置")
+	}
+	if prefs, _ := engine.ReadPrefs(wd); prefs.Cfst == "" {
+		a.scanMu.Unlock()
+		return nil, fmt.Errorf("请先导入或下载 CloudflareSpeedTest")
+	}
+	a.scanStop = engine.NewStopEvent()
+	a.scanRunning = true
+	a.scanMu.Unlock()
+
+	go func() {
+		defer func() {
+			a.scanMu.Lock()
+			a.scanRunning = false
+			a.scanStop = nil
+			a.scanMu.Unlock()
+		}()
+		log := func(msg string) { a.emitLog(msg) }
+		report, err := engine.DoScan(wd, a.scanStop, log, dryRun, "", "", "")
+		if err != nil {
+			a.emitEvent("scan-failed", map[string]any{"error": err.Error()})
+			return
+		}
+		a.emitEvent("scan-completed", map[string]any{
+			"chosen":    report.Chosen,
+			"qualified": report.Qualified,
+			"candidates": report.Candidates,
+		})
+	}()
+	return map[string]any{"started": true}, nil
+}
+
+// StopScan 停止扫描。
+func (a *App) StopScan() map[string]any {
+	a.scanMu.Lock()
+	defer a.scanMu.Unlock()
+	if a.scanStop != nil {
+		a.scanStop.Set()
+		return map[string]any{"stopped": true}
+	}
+	return map[string]any{"stopped": false}
+}
+
+// ── 其它 ──────────────────────────────────────────────────────────────
+
+// Rollback 恢复上一次候选池。
+func (a *App) Rollback() (map[string]any, error) {
+	wd, err := a.workdir()
+	if err != nil {
+		return nil, err
+	}
+	ok, err := engine.Rollback(wd)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"rolled": ok}, nil
+}
+
+// ── macOS 集成 ─────────────────────────────────────────────────────────
+
+// LoginEnabled 查询是否设置登录自启。
+func (a *App) LoginEnabled() bool {
+	return engine.LoginEnabled()
+}
+
+// SetLogin 开关登录自启。
+func (a *App) SetLogin(enabled bool) (map[string]any, error) {
+	if err := engine.SetLogin(enabled); err != nil {
+		return nil, err
+	}
+	return map[string]any{"enabled": engine.LoginEnabled()}, nil
+}
+
+// OpenConfigFolder 在 Finder 中打开工作目录。
+func (a *App) OpenConfigFolder() error {
+	wd, err := a.workdir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(wd, 0o700); err != nil {
+		return err
+	}
+	return exec.Command("open", wd).Start()
+}
+
+// OpenGeneratedConfig 复制路径到剪贴板 + 打开工作目录。
+func (a *App) OpenGeneratedConfig() (map[string]any, error) {
+	wd, err := a.workdir()
+	if err != nil {
+		return nil, err
+	}
+	p := filepath.Join(wd, "clash-auto.yaml")
+	if _, err := os.Stat(p); err != nil {
+		return nil, fmt.Errorf("请先生成 Clash 配置")
+	}
+	// 前端负责写剪贴板，这里只返回路径
+	if err := exec.Command("open", wd).Start(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"path": p}, nil
+}
+
+// emitLog / emitEvent 帮前端接 EventsOn("log" / "scan-*")。
+func (a *App) emitLog(msg string) {
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, "log", msg)
+	}
+}
+
+func (a *App) emitEvent(name string, data map[string]any) {
+	if a.ctx != nil {
+		wailsruntime.EventsEmit(a.ctx, name, data)
 	}
 }

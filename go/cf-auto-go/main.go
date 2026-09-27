@@ -4,6 +4,8 @@ import (
 	"embed"
 	"log"
 
+	"cf-auto-go/internal/engine"
+
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -14,8 +16,15 @@ import (
 var assets embed.FS
 
 func main() {
+	// 单实例锁（防止 launchctl 启两个导致端口冲突）
+	unlock, err := engine.SingleInstanceLock()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer unlock()
+
 	app := NewApp()
-	err := wails.Run(&options.App{
+	err = wails.Run(&options.App{
 		Title:     "CF Auto Desktop",
 		Width:     900,
 		Height:    860,
