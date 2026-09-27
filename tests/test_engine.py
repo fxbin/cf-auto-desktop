@@ -159,3 +159,190 @@ def test_loopback_provider_token():
                 assert ex.code == 404
         finally:
             srv.stop()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 内置官方 cfst 下载（安全不变量）
+# ─────────────────────────────────────────────────────────────────────────────
+import hashlib
+import io
+import platform
+import zipfile
+import engine as _e  # already imported, alias for clarity in this block
+
+
+def _make_zip(files: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in files.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_cfst_url_allowlist_rejects_non_official():
+    # 域名伪造 / 非 https / file:// 全部拒绝
+    for bad in [
+        "http://github.com/XIU2/CloudflareSpeedTest/x.zip",
+        "https://evil.com/x.zip",
+        "https://github.com.evil.com/x.zip",
+        "https://XIU2.evil.com/x.zip",
+        "file:///etc/passwd",
+        "ftp://github.com/x.zip",
+    ]:
+        try:
+            _e._assert_official_url(bad)
+            assert False, f"should reject {bad}"
+        except ValueError:
+            pass
+    # 官方三个 host 通过
+    for ok in [
+        "https://github.com/XIU2/CloudflareSpeedTest/releases/download/v1/x.zip",
+        "https://api.github.com/repos/XIU2/CloudflareSpeedTest/releases/latest",
+        "https://objects.githubusercontent.com/x",
+    ]:
+        _e._assert_official_url(ok)
+
+
+def test_cfst_asset_name_matches_arch():
+    name = _e._cfst_asset_name()
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        assert name == "cfst_darwin_arm64.zip"
+    elif machine in ("x86_64", "amd64"):
+        assert name == "cfst_darwin_amd64.zip"
+    else:
+        assert False, f"unknown arch {machine}"
+
+
+def test_cfst_download_fails_closed_on_digest_mismatch():
+    """SHA256 不匹配必须中止，绝不写入工作区。"""
+    with tempfile.TemporaryDirectory() as t:
+        wd = Path(t)
+        payload = _make_zip({"cfst": b"FAKE_BINARY", "ip.txt": b"1.1.1.0/24\n"})
+        good_sha = hashlib.sha256(payload).hexdigest()
+
+        def fake_fetch_json(url, timeout=20):
+            return {
+                "tag_name": "v0.0-test",
+                "assets": [{
+                    "name": _e._cfst_asset_name(),
+                    "browser_download_url":
+                        "https://github.com/XIU2/CloudflareSpeedTest/releases/download/v0/x.zip",
+                    "digest": "sha256:" + "0" * 64,   # 与实际不符
+                    "size": len(payload),
+                }],
+            }
+
+        def fake_download_to(url, dest, *, timeout=180, log=None, progress=None):
+            dest.write_bytes(payload)
+
+        with patch.object(_e, "_fetch_json", side_effect=fake_fetch_json), \
+             patch.object(_e, "_download_to", side_effect=fake_download_to):
+            try:
+                _e.download_cfst(wd)
+                assert False, "must fail on digest mismatch"
+            except ValueError as exc:
+                assert "SHA256" in str(exc)
+        # 关键：工作区不得留下 cfst-bundle
+        assert not (wd / "cfst-bundle").exists()
+        assert not (wd / "prefs.json").exists() or "cfst" not in (wd / "prefs.json").read_text()
+
+
+def test_cfst_download_installs_only_whitelisted_files():
+    """即使压缩包带 .sh / 其它杂项，也只落盘 cfst + ip.txt。"""
+    with tempfile.TemporaryDirectory() as t:
+        wd = Path(t)
+        payload = _make_zip({
+            "cfst": b"FAKE_BINARY",
+            "ip.txt": b"1.1.1.0/24\n",
+            "cfst_hosts.sh": b"#!/bin/sh\necho pwned\n",
+            "ipv6.txt": b"::/0\n",
+            "subdir/evil.sh": b"#!/bin/sh\n",
+            "../evil.txt": b"should be rejected\n",
+        })
+        good_sha = hashlib.sha256(payload).hexdigest()
+
+        def fake_fetch_json(url, timeout=20):
+            return {
+                "tag_name": "v0.0-test",
+                "assets": [{
+                    "name": _e._cfst_asset_name(),
+                    "browser_download_url":
+                        "https://github.com/XIU2/CloudflareSpeedTest/releases/download/v0/x.zip",
+                    "digest": "sha256:" + good_sha,
+                    "size": len(payload),
+                }],
+            }
+
+        def fake_download_to(url, dest, *, timeout=180, log=None, progress=None):
+            dest.write_bytes(payload)
+
+        with patch.object(_e, "_fetch_json", side_effect=fake_fetch_json), \
+             patch.object(_e, "_download_to", side_effect=fake_download_to):
+            # ../evil.txt 会触发 zip-slip 拒绝
+            try:
+                _e.download_cfst(wd)
+                assert False, "must reject zip-slip"
+            except ValueError as exc:
+                assert "路径非法" in str(exc) or "zip" in str(exc).lower()
+
+        # 换成无 zip-slip 的包，验证白名单
+        payload2 = _make_zip({
+            "cfst": b"FAKE_BINARY",
+            "ip.txt": b"1.1.1.0/24\n",
+            "cfst_hosts.sh": b"#!/bin/sh\n",
+            "ipv6.txt": b"::/0\n",
+        })
+        sha2 = hashlib.sha256(payload2).hexdigest()
+
+        def fake_fetch_json2(url, timeout=20):
+            return {
+                "tag_name": "v0.0-test",
+                "assets": [{
+                    "name": _e._cfst_asset_name(),
+                    "browser_download_url":
+                        "https://github.com/XIU2/CloudflareSpeedTest/releases/download/v0/x.zip",
+                    "digest": "sha256:" + sha2,
+                    "size": len(payload2),
+                }],
+            }
+
+        def fake_download_to2(url, dest, *, timeout=180, log=None, progress=None):
+            dest.write_bytes(payload2)
+
+        with patch.object(_e, "_fetch_json", side_effect=fake_fetch_json2), \
+             patch.object(_e, "_download_to", side_effect=fake_download_to2):
+            dest = _e.download_cfst(wd)
+
+        bundle = dest.parent
+        names = sorted(p.name for p in bundle.iterdir())
+        assert names == ["cfst", "ip.txt"], f"only whitelisted: {names}"
+        assert (dest.stat().st_mode & 0o077) == 0       # 仅 owner
+        assert ((bundle / "ip.txt").stat().st_mode & 0o077) == 0
+        # prefs 指向新 cfst
+        assert _e.read_prefs(wd)["cfst"] == str(dest)
+
+
+def test_cfst_download_fails_if_digest_missing():
+    """GitHub API 没给 sha256 digest 时 fail closed。"""
+    with tempfile.TemporaryDirectory() as t:
+        wd = Path(t)
+
+        def fake_fetch_json(url, timeout=20):
+            return {
+                "tag_name": "v0.0-test",
+                "assets": [{
+                    "name": _e._cfst_asset_name(),
+                    "browser_download_url":
+                        "https://github.com/XIU2/CloudflareSpeedTest/releases/download/v0/x.zip",
+                    # 故意不带 digest
+                }],
+            }
+
+        with patch.object(_e, "_fetch_json", side_effect=fake_fetch_json):
+            try:
+                _e.download_cfst(wd)
+                assert False, "must fail when digest is missing"
+            except ValueError as exc:
+                assert "digest" in str(exc).lower() or "sha256" in str(exc).lower()
+        assert not (wd / "cfst-bundle").exists()

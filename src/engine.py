@@ -14,6 +14,7 @@ import http.server
 import ipaddress
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import secrets
@@ -27,6 +28,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.parse
+import urllib.request
+import zipfile
 import yaml
 
 APP_NAME = "CF Auto Desktop"
@@ -37,6 +40,29 @@ FALLBACK = "CF动态容灾"
 CHOOSER = "代理选择"
 SEEDS = ["172.64.153.119", "104.19.155.174"]  # 仅历史种子，使用前需重新验证
 INTERVAL_CHOICES = [3, 6, 12, 24]
+# Scan presets — trade thoroughness for CPU/network footprint.
+# standard = historical defaults; light = fewer threads/repeats, smaller pool.
+SCAN_PRESETS = {
+    "standard": {"repeat": 3, "max_candidates": 30, "keep": 5, "workers": 6,
+                 "cfst_n": 80, "cfst_t": 4, "cfst_tl": 300},
+    "light":    {"repeat": 2, "max_candidates": 12, "keep": 3, "workers": 3,
+                 "cfst_n": 30, "cfst_t": 3, "cfst_tl": 200},
+}
+# ─────────────────────────────────────────────────────────────────────────────
+# CloudflareSpeedTest 官方内置下载（唯一允许的来源）
+# 硬约束：
+#   * 仅允许 https://github.com/XIU2/CloudflareSpeedTest 这一个仓库的 Releases
+#   * 必须从 GitHub API 拿到 assets[].digest（sha256），下载后严格比对
+#   * 仅解压 cfst / ip.txt 两个文件，不执行任何 shell / 安装脚本
+#   * 校验失败立即丢弃临时文件，绝不写入工作区
+# ─────────────────────────────────────────────────────────────────────────────
+CFST_REPO_OWNER = "XIU2"
+CFST_REPO_NAME = "CloudflareSpeedTest"
+CFST_RELEASE_API = (
+    f"https://api.github.com/repos/{CFST_REPO_OWNER}/{CFST_REPO_NAME}/releases/latest"
+)
+CFST_ALLOWED_HOSTS = {"github.com", "api.github.com", "objects.githubusercontent.com"}
+CFST_EXPECTED_UA = "CF-Auto-Desktop/1 (+local; personal use)"
 
 
 def app_home() -> Path:
@@ -164,10 +190,14 @@ def generate_main(config: dict, state: dict) -> dict:
 
 def read_prefs(workdir: Path) -> dict:
     p = workdir / "prefs.json"
-    if not p.exists():
-        return {"cfst": "", "every_hours": 6, "auto_scan": True,
+    defaults = {"cfst": "", "every_hours": 6, "auto_scan": True,
+                "scan_mode": "standard",
                 "last_attempt": None, "last_success": None, "last_status": "尚未扫描"}
-    return json.loads(p.read_text(encoding="utf-8"))
+    if not p.exists():
+        return defaults
+    data = json.loads(p.read_text(encoding="utf-8"))
+    defaults.update(data)
+    return defaults
 
 
 def update_prefs(workdir: Path, **kwargs) -> None:
@@ -228,6 +258,157 @@ def import_cfst(workdir: Path, chosen: Path) -> Path:
     os.chmod(dest, 0o700)
     os.chmod(target / "ip.txt", 0o600)
     update_prefs(workdir, cfst=str(dest))
+    return dest
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 内置官方 cfst 下载（见文件顶部硬约束注释）
+# ─────────────────────────────────────────────────────────────────────────────
+def _cfst_asset_name() -> str:
+    """Map current Mac arch to the official Release asset name."""
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        return "cfst_darwin_arm64.zip"
+    if machine in ("x86_64", "amd64"):
+        return "cfst_darwin_amd64.zip"
+    raise ValueError(f"未支持的 CPU 架构：{machine}（请手动导入 cfst）")
+
+
+def _assert_official_url(url: str) -> None:
+    """HTTPS + pinned allow-list of hosts. Fail closed on anything else."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https":
+        raise ValueError("只允许 https 下载")
+    host = (parts.hostname or "").lower()
+    if host not in CFST_ALLOWED_HOSTS:
+        raise ValueError(f"非官方下载源：{host}")
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 256), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fetch_json(url: str, timeout: float = 20) -> dict:
+    _assert_official_url(url)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": CFST_EXPECTED_UA,
+        "Accept": "application/vnd.github+json",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _download_to(url: str, dest: Path, *, timeout: float = 180,
+                 log=None, progress=None) -> None:
+    _assert_official_url(url)
+    log = log or (lambda msg: None)
+    progress = progress or (lambda done, total: None)
+    req = urllib.request.Request(url, headers={"User-Agent": CFST_EXPECTED_UA})
+    with urllib.request.urlopen(req, timeout=timeout) as resp, dest.open("wb") as out:
+        total = int(resp.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            block = resp.read(1024 * 128)
+            if not block:
+                break
+            out.write(block)
+            done += len(block)
+            progress(done, total)
+    if dest.stat().st_size == 0:
+        raise ValueError("下载内容为空")
+
+
+def download_cfst(workdir: Path, *, log=None, progress=None,
+                  stop: threading.Event | None = None) -> Path:
+    """从 GitHub 官方 Releases 下载 cfst 并校验 SHA256，只解压 cfst / ip.txt。
+
+    安全硬边界（对应文件顶部注释）：
+      * 仅允许 https + CFST_ALLOWED_HOSTS
+      * 必须拿到 GitHub API 的 assets[].digest，比对失败立即中止
+      * 只解压 cfst / ip.txt，忽略其它文件（含 *.sh 脚本）
+      * 从不执行 cfst，只落盘 + 更新 prefs
+    """
+    log = log or (lambda msg: None)
+    progress = progress or (lambda done, total: None)
+    stop = stop or threading.Event()
+
+    want = _cfst_asset_name()
+    log(f"查询官方 Releases：{CFST_REPO_OWNER}/{CFST_REPO_NAME} …")
+    meta = _fetch_json(CFST_RELEASE_API)
+    tag = meta.get("tag_name") or "(unknown)"
+    assets = [a for a in meta.get("assets", []) if a.get("name") == want]
+    if len(assets) != 1:
+        raise ValueError(f"官方 Releases 缺少 {want}（当前 tag={tag}）")
+    asset = assets[0]
+    url = asset.get("browser_download_url") or ""
+    digest_field = asset.get("digest") or ""
+    if not url.startswith("https://"):
+        raise ValueError("Release 资产缺少 https 下载地址")
+    if not digest_field.startswith("sha256:"):
+        raise ValueError("官方 Release 缺少 sha256 digest，拒绝下载（fail closed）")
+    expected_sha = digest_field.split(":", 1)[1].strip().lower()
+    if len(expected_sha) != 64 or any(c not in "0123456789abcdef" for c in expected_sha):
+        raise ValueError("digest 格式非法")
+
+    log(f"官方版本 {tag} · 资产 {want} · 大小 {asset.get('size', 0)/1e6:.1f} MB")
+
+    workdir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=workdir) as tmp:
+        tmpdir = Path(tmp)
+        zip_path = tmpdir / want
+        log("开始下载（未使用代理环境变量；走 HTTPS + SHA256 校验）…")
+        _download_to(url, zip_path, log=log, progress=progress)
+        if stop.is_set():
+            raise RuntimeError("已取消下载")
+
+        actual_sha = _sha256_file(zip_path)
+        if actual_sha != expected_sha:
+            raise ValueError(
+                f"SHA256 校验失败\n  期望 {expected_sha}\n  实际 {actual_sha}\n"
+                "已中止，未写入工作区。"
+            )
+        log(f"SHA256 校验通过：{actual_sha[:16]}…")
+
+        # 只解压白名单文件，忽略 cfst_hosts.sh / ipv6.txt / 说明文本
+        allow = {"cfst", "CloudflareSpeedTest", "ip.txt"}
+        extracted: dict[str, Path] = {}
+        with zipfile.ZipFile(zip_path) as zf:
+            for info in zf.infolist():
+                # 先做 zip-slip / 绝对路径检查（显式拒绝，不静默跳过）
+                entry = Path(info.filename)
+                if entry.is_absolute() or ".." in entry.parts or ":" in info.filename[:3]:
+                    raise ValueError(f"压缩包条目路径非法：{info.filename}")
+                # 再过白名单（只解压我们真正需要的两个文件）
+                name = entry.name
+                if name not in allow:
+                    continue
+                target = tmpdir / name
+                with zf.open(info) as src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                extracted[name] = target
+
+        # 归一化文件名：官方 zip 内是 `cfst`；有些旧版是 `CloudflareSpeedTest`
+        binary = extracted.get("cfst") or extracted.get("CloudflareSpeedTest")
+        ip_txt = extracted.get("ip.txt")
+        if binary is None:
+            raise ValueError("压缩包缺少 cfst 可执行文件")
+        if ip_txt is None or not ip_txt.read_text(errors="replace").strip():
+            raise ValueError("压缩包缺少有效的 ip.txt")
+
+        target_dir = workdir / "cfst-bundle"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        dest = target_dir / "cfst"
+        shutil.copy2(binary, dest)
+        shutil.copy2(ip_txt, target_dir / "ip.txt")
+        os.chmod(dest, 0o700)
+        os.chmod(target_dir / "ip.txt", 0o600)
+
+    update_prefs(workdir, cfst=str(dest))
+    log(f"已安装到：{dest}")
     return dest
 
 
@@ -296,13 +477,22 @@ def check_candidate(ip: str, domain: str, path: str, repeat: int, stop: threadin
 
 def do_scan(workdir: Path, *, stop: threading.Event | None = None, log=None,
             dry_run: bool = False, cfst_override: Path | None = None,
-            csv_override: Path | None = None, repeat: int = 3,
-            max_candidates: int = 30, keep: int = 5) -> dict:
+            csv_override: Path | None = None,
+            scan_mode: str | None = None,
+            repeat: int | None = None,
+            max_candidates: int | None = None,
+            keep: int | None = None) -> dict:
     """Scan, recheck, stage & atomic publish. On errors, leave active provider untouched."""
     stop = stop or threading.Event()
     log = log or (lambda msg: None)
     state = load_state(workdir)
     prefs = read_prefs(workdir)
+    preset = SCAN_PRESETS.get(scan_mode or prefs.get("scan_mode", "standard"),
+                              SCAN_PRESETS["standard"])
+    repeat = repeat if repeat is not None else preset["repeat"]
+    max_candidates = max_candidates if max_candidates is not None else preset["max_candidates"]
+    keep = keep if keep is not None else preset["keep"]
+    workers = preset["workers"]
     cfst = Path(cfst_override) if cfst_override else Path(prefs.get("cfst", ""))
     if not csv_override and (not cfst.is_file() or not (cfst.parent / "ip.txt").is_file()):
         raise ValueError("请先导入包含 ip.txt 的 CloudflareSpeedTest 可执行文件")
@@ -316,8 +506,11 @@ def do_scan(workdir: Path, *, stop: threading.Event | None = None, log=None,
         if output.exists():
             output.unlink()
         # -dd disables downloaded-file speed test; this is candidate discovery only.
-        args = [str(cfst), "-f", "ip.txt", "-tp", "443", "-tl", "300",
-                "-t", "4", "-n", "80", "-dd", "-o", str(output), "-p", "0"]
+        args = [str(cfst), "-f", "ip.txt", "-tp", "443",
+                "-tl", str(preset["cfst_tl"]),
+                "-t", str(preset["cfst_t"]),
+                "-n", str(preset["cfst_n"]),
+                "-dd", "-o", str(output), "-p", "0"]
         env = os.environ.copy()
         for key in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
             env.pop(key, None)
@@ -352,7 +545,7 @@ def do_scan(workdir: Path, *, stop: threading.Event | None = None, log=None,
         raise RuntimeError("已取消扫描，原节点池不变")
     log(f"找到 {len(pool)} 个候选，开始域名 TLS + WebSocket 验证…")
     results = []
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(check_candidate, ip, state["domain"], state["path"], repeat, stop)
                    for ip in pool]
         for future in as_completed(futures):

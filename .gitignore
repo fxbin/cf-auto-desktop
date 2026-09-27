@@ -27,3 +27,4 @@ build/
 # Local tooling (never commit)
 .env
 .env.*
+docs/
