@@ -114,8 +114,40 @@ func (a *App) CopySubscribeURL() (string, error) {
 
 // ── YAML 导入 / 生成 ─────────────────────────────────────────────────────
 
+// OpenYAMLDialog 打开系统文件对话框让用户选 YAML；取消时返回空路径。
+func (a *App) OpenYAMLDialog() (string, error) {
+	path, err := wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title: "选择原始 Clash YAML",
+		Filters: []wailsruntime.FileFilter{
+			{DisplayName: "Clash 配置 (*.yaml, *.yml)", Pattern: "*.yaml;*.yml"},
+			{DisplayName: "所有文件", Pattern: "*"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// OpenCfstDialog 打开系统文件对话框让用户选 cfst 可执行；取消时返回空路径。
+func (a *App) OpenCfstDialog() (string, error) {
+	path, err := wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title: "选择官方 CloudflareSpeedTest 可执行文件",
+		Filters: []wailsruntime.FileFilter{
+			{DisplayName: "可执行文件 (cfst, CloudflareSpeedTest)", Pattern: "cfst;CloudflareSpeedTest;*"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 // ImportYAML 校验 YAML 并返回可选节点列表（前端后续调用 GenerateConfig）。
 func (a *App) ImportYAML(path string) (map[string]any, error) {
+	if path == "" {
+		return nil, fmt.Errorf("未选择文件")
+	}
 	cfg, err := engine.LoadYAML(path)
 	if err != nil {
 		return nil, err

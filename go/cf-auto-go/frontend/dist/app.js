@@ -91,19 +91,65 @@ EventsOn('scan-failed', (data) => {
 bind('btn-import-yaml', async () => {
   const A = App();
   if (!A) return log('（PoC）导入 YAML 需 Wails 后端');
-  // TODO: 用 runtime.OpenFileDialog 让用户选；这里先提示
-  log('请通过系统文件对话框选择原始 Clash YAML');
-  setStatus('等待选择文件', 'busy');
+  try {
+    const path = await A.OpenYAMLDialog();
+    if (!path) {
+      log('已取消选择');
+      setStatus('待配置', 'idle');
+      return;
+    }
+    log('选择文件：' + path.split('/').pop());
+    const r = await A.ImportYAML(path);
+    if (r.error) {
+      log('YAML 校验失败：' + r.error);
+      setStatus('YAML 校验失败', 'err');
+      return;
+    }
+    // 更新下拉框
+    const sel = document.getElementById('node-select');
+    sel.innerHTML = '';
+    for (const name of r.nodes) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      sel.appendChild(opt);
+    }
+    if (r.preferred) sel.value = r.preferred;
+    window.__yamlPath = r.path;
+    log(`找到 ${r.nodes.length} 个 VLESS+WS+TLS 节点` +
+        (r.preferred ? `，默认选中 ${r.preferred}` : ''));
+    setStatus('YAML 已导入', 'ok');
+  } catch (e) {
+    log('导入失败：' + e);
+    setStatus('导入失败', 'err');
+  }
 });
 
 bind('btn-generate', async () => {
   const A = App();
   if (!A) return log('（PoC）生成配置需 Wails 后端');
-  log('生成 Clash 配置：点击按钮');
-  setStatus('生成中…', 'busy');
-  // 需要用户先选 YAML；此处是 PoC
-  log('请先通过「导入 YAML」选择文件');
-  setStatus('待配置', 'idle');
+  const yamlPath = window.__yamlPath;
+  const node = document.getElementById('node-select').value;
+  if (!yamlPath) {
+    log('请先点击「导入 YAML」选择文件');
+    return;
+  }
+  if (!node || node === '—') {
+    log('请先在「原节点」下拉中选一个节点');
+    return;
+  }
+  try {
+    setStatus('生成中…', 'busy');
+    const r = await A.GenerateConfig(yamlPath, node);
+    log('已生成：' + r.generated);
+    log('推荐：在 Clash Party 选「订阅 / 导入 URL」粘贴下方链接：');
+    log('  ' + r.subscribe_url);
+    log('→ 或点右侧「复制订阅 URL」。候选池走 HTTP，Clash 每 60s 自动拉取。');
+    setStatus('已生成', 'ok');
+  } catch (e) {
+    log('生成失败：' + e);
+    setStatus('生成失败', 'err');
+  }
 });
 
 bind('btn-download-cfst', async () => {
@@ -126,6 +172,27 @@ bind('btn-download-cfst', async () => {
     alert('下载失败：' + e + '\n\n可改用「手动导入」。');
   } finally {
     setBusy(false);
+  }
+});
+
+bind('btn-import-cfst', async () => {
+  const A = App();
+  if (!A) return log('（PoC）手动导入需 Wails 后端');
+  try {
+    const path = await A.OpenCfstDialog();
+    if (!path) {
+      log('已取消选择');
+      return;
+    }
+    if (!confirm('仅导入你信任的 CloudflareSpeedTest 文件。\n' +
+      '应用会复制 cfst + ip.txt 到私有目录。继续吗？')) return;
+    const r = await A.ImportCfst(path);
+    document.getElementById('cfst-label').textContent = `已安装 · ${r.path.split('/').slice(-2)[0]}`;
+    log('手动导入完成');
+    setStatus('cfst 已安装', 'ok');
+  } catch (e) {
+    log('导入失败：' + e);
+    setStatus('导入失败', 'err');
   }
 });
 
