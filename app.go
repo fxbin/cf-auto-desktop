@@ -439,20 +439,27 @@ func (a *App) emitEvent(name string, data map[string]any) {
 
 // ── 窗口控制（托盘集成用） ───────────────────────────────────────────────
 
-// ShowWindow 显示并前置主窗口（托盘「打开控制台」）。
+// ShowWindow 显示并前置主窗口（托盘 / Dock 唤回）。
+//
+// 走 app 级 runtime.Show（NSApp unhide + activateIgnoringOtherApps），
+// 而非 window 级 WindowShow —— 后者只 makeKeyAndOrderFront 对 orderOut 的
+// 窗口无效（Wails v2 AppDelegate 缺 applicationShouldHandleReopen）。
 func (a *App) ShowWindow() {
 	if a.ctx != nil {
-		wailsruntime.WindowShow(a.ctx)
+		wailsruntime.Show(a.ctx) // NSApp unhide + activateIgnoringOtherApps
 		wailsruntime.WindowUnminimise(a.ctx)
-		wailsruntime.WindowSetAlwaysOnTop(a.ctx, true)
-		wailsruntime.WindowSetAlwaysOnTop(a.ctx, false)
+		wailsruntime.WindowShow(a.ctx) // makeKeyAndOrderFront（兜底）
 	}
 }
 
-// HideWindow 隐藏主窗口（关窗 → 收进托盘）。
+// HideWindow 隐藏应用到 Dock（关窗 → 后台常驻）。
+//
+// 走 app 级 runtime.Hide（NSApp hide:），让 Dock 图标变暗；
+// Dock 点击时 macOS 自动 unhide，窗口按隐藏前状态回来。
+// 不用 WindowHide（orderOut）：那会让 Dock 点击唤不回窗口。
 func (a *App) HideWindow() {
 	if a.ctx != nil {
-		wailsruntime.WindowHide(a.ctx)
+		wailsruntime.Hide(a.ctx) // NSApp hide:
 	}
 }
 

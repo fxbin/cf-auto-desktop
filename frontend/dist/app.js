@@ -64,6 +64,11 @@ async function loadStatus() {
     // ── 设置项恢复 ──
     const autoEl = document.getElementById('auto-scan');
     if (autoEl) autoEl.checked = !!st.auto_scan;
+    try {
+      const loginOn = await A.LoginEnabled();
+      const loginEl = document.getElementById('login-start');
+      if (loginEl) loginEl.checked = !!loginOn;
+    } catch (_) {}
     const intervalEl = document.getElementById('interval');
     if (intervalEl && st.every_hours) {
       intervalEl.value = `每 ${st.every_hours} 小时`;
@@ -300,6 +305,19 @@ bind('btn-copy-url', async () => {
     log('→ 在 Clash Party 选「订阅 / 导入 URL」粘贴即可');
   } catch (e) {
     log('复制失败：' + e);
+  }
+});
+
+bind('login-start', async (e) => {
+  const A = App();
+  if (!A) return log('Wails 后端未就绪');
+  const want = e.target.checked;
+  try {
+    await A.SetLogin(want);
+    log('开机登录启动：' + (want ? '已开启' : '已关闭'));
+  } catch (err) {
+    log('设置登录自启失败：' + err);
+    e.target.checked = !want;
   }
 });
 

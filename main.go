@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"log"
 
@@ -39,11 +38,10 @@ func main() {
 		BackgroundColour: &options.RGBA{R: 249, G: 249, B: 249, A: 255},
 		OnStartup:        app.startup,
 		OnShutdown:       app.shutdown,
-		// 关窗 → 隐藏到托盘（不退出）。真正退出走托盘菜单「退出程序」
-		OnBeforeClose: func(ctx context.Context) (prevent bool) {
-			app.HideWindow()
-			return true // prevent close
-		},
+		// 关窗 → 隐藏到 Dock（Wails v2 原生 HideWindowOnClose）。
+		// 红 × 触发 [NSApp hide:]，窗口不销毁；Dock 点击 macOS 自动 unhide，
+		// 窗口按隐藏前状态回来。Cmd+Q / Dock 菜单退出才真正结束进程。
+		HideWindowOnClose: true,
 		Bind: []interface{}{
 			app,
 		},
