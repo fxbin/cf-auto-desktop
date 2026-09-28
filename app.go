@@ -12,6 +12,7 @@ import (
 	"cf-auto-go/internal/engine"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+
 )
 
 // App struct — Wails 绑定到前端 window.go.main.App.*
@@ -100,28 +101,38 @@ func (a *App) Alert(title, message string) error {
 // ── 状态 / 配置查询 ─────────────────────────────────────────────────────
 
 // GetStatus 供前端启动时读取 UI 初值。
+// 返回值包含 UI 恢复所需的一切：yaml_path、节点列表、订阅 URL、prefs、cfst。
 func (a *App) GetStatus() map[string]any {
 	wd, err := a.workdir()
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
 	out := map[string]any{"workdir": wd}
+
+	prefs, _ := engine.ReadPrefs(wd)
+	out["cfst"] = ""
+	if prefs.Cfst != "" {
+		out["cfst"] = filepath.Base(filepath.Dir(prefs.Cfst))
+		out["cfst_path"] = prefs.Cfst
+	}
+	out["auto_scan"] = prefs.AutoScan
+	out["every_hours"] = prefs.EveryHours
+	out["scan_mode"] = prefs.ScanMode
+	out["last_status"] = prefs.LastStatus
+
 	if state, _ := engine.LoadState(wd, false); state != nil {
 		out["configured"] = true
 		out["node_name"] = state.NodeName
+		out["yaml_path"] = state.YamlPath
+		out["node_names"] = state.NodeNames
 		// 不把 domain / uuid 泄露给前端（隐私脱敏，与 Python 版一致）
 	} else {
 		out["configured"] = false
+		// 即便未生成配置，也把最近导入的 YAML 恢复出来
+		out["yaml_path"] = prefs.LastYamlPath
+		out["node_names"] = prefs.LastNodes
 	}
-	if prefs, _ := engine.ReadPrefs(wd); prefs.Cfst != "" {
-		out["cfst"] = filepath.Base(filepath.Dir(prefs.Cfst))
-		out["auto_scan"] = prefs.AutoScan
-		out["every_hours"] = prefs.EveryHours
-		out["scan_mode"] = prefs.ScanMode
-		out["last_status"] = prefs.LastStatus
-	} else {
-		out["cfst"] = ""
-	}
+
 	if urls, _ := engine.ProviderURLs(wd); urls != nil {
 		out["subscribe_url"] = urls["config"]
 		out["candidates_url"] = urls["candidates"]
@@ -177,6 +188,7 @@ func (a *App) OpenCfstDialog() (string, error) {
 }
 
 // ImportYAML 校验 YAML 并返回可选节点列表（前端后续调用 GenerateConfig）。
+// 导入成功即把路径与节点列表写入 prefs，重启后 UI 可恢复（即使尚未生成配置）。
 func (a *App) ImportYAML(path string) (map[string]any, error) {
 	if path == "" {
 		return nil, fmt.Errorf("未选择文件")
@@ -203,6 +215,16 @@ func (a *App) ImportYAML(path string) (map[string]any, error) {
 			break
 		}
 	}
+
+	// 持久化到 prefs（重启后 UI 可恢复）
+	wd, err := a.workdir()
+	if err == nil {
+		_ = engine.UpdatePrefs(wd, func(p *engine.Prefs) {
+			p.LastYamlPath = path
+			p.LastNodes = names
+		})
+	}
+
 	return map[string]any{
 		"nodes":     names,
 		"preferred": preferred,
@@ -412,5 +434,45 @@ func (a *App) emitLog(msg string) {
 func (a *App) emitEvent(name string, data map[string]any) {
 	if a.ctx != nil {
 		wailsruntime.EventsEmit(a.ctx, name, data)
+	}
+}
+
+// ── 窗口控制（托盘集成用） ───────────────────────────────────────────────
+
+// ShowWindow 显示并前置主窗口（托盘「打开控制台」）。
+func (a *App) ShowWindow() {
+	if a.ctx != nil {
+		wailsruntime.WindowShow(a.ctx)
+		wailsruntime.WindowUnminimise(a.ctx)
+		wailsruntime.WindowSetAlwaysOnTop(a.ctx, true)
+		wailsruntime.WindowSetAlwaysOnTop(a.ctx, false)
+	}
+}
+
+// HideWindow 隐藏主窗口（关窗 → 收进托盘）。
+func (a *App) HideWindow() {
+	if a.ctx != nil {
+		wailsruntime.WindowHide(a.ctx)
+	}
+}
+
+// QuitApp 真正退出应用（托盘「退出程序」）。
+// 先停 Provider 与扫描，再让 Wails 主循环结束。
+func (a *App) QuitApp() {
+	a.scanMu.Lock()
+	if a.scanStop != nil {
+		a.scanStop.Set()
+	}
+	a.scanMu.Unlock()
+
+	a.providerMu.Lock()
+	if a.provider != nil {
+		a.provider.Stop()
+		a.provider = nil
+	}
+	a.providerMu.Unlock()
+
+	if a.ctx != nil {
+		wailsruntime.Quit(a.ctx)
 	}
 }

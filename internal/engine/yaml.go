@@ -344,12 +344,22 @@ func Setup(workdir, configFile, nodeName string) (string, error) {
 		}
 	}
 
+	// 收集 YAML 里所有可选节点名（重启后 UI 用）
+	nodeNames := make([]string, 0)
+	for _, n := range EligibleNodes(raw) {
+		if name, _ := n["name"].(string); name != "" {
+			nodeNames = append(nodeNames, name)
+		}
+	}
+
 	state := &State{
-		Node:     node,
-		Domain:   domain,
-		Path:     path,
-		Token:    token,
-		NodeName: nodeName,
+		Node:      node,
+		Domain:    domain,
+		Path:      path,
+		Token:     token,
+		NodeName:  nodeName,
+		YamlPath:  configFile,
+		NodeNames: nodeNames,
 	}
 
 	main, err := GenerateMain(raw, state)

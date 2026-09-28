@@ -72,6 +72,9 @@ cf-auto-desktop/
 ## 说明
 
 - 需要你自己准备：原始 Clash YAML（含真实 UUID）。CloudflareSpeedTest 已内置官方下载
+- **关窗不退出**：点窗口红 × 只是隐藏到 Dock，App 继续在后台跑 Provider 和定时扫描
+- **唤回窗口**：点 Dock 上的 CF Auto Desktop 图标
+- **真正退出**：`Cmd+Q` 或 Dock 图标右键 → 退出
 - 本工具不上传任何配置，也不修改 Clash Party 现有配置
 - 未做 Apple 签名 / 公证，仅建议自己使用
 

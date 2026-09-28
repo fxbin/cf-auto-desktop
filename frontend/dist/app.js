@@ -42,11 +42,11 @@ function bind(id, handler) {
   if (el) el.addEventListener('click', handler);
 }
 
-// ── 加载初始状态 ──────────────────────────────────────────────────────────
+// ── 加载初始状态（重启后恢复 UI） ──────────────────────────────────────────
 async function loadStatus() {
   const A = App();
   if (!A) {
-    log('PoC · Wails 绑定未就绪（浏览器预览模式）');
+    log('Wails 绑定未就绪（浏览器预览模式）');
     return;
   }
   try {
@@ -55,18 +55,54 @@ async function loadStatus() {
       log('读取状态失败：' + st.error);
       return;
     }
-    if (st.configured) {
-      setStatus('运行中 · 等待扫描', 'ok');
-      log(`已加载配置：节点 ${st.node_name}`);
-    } else {
-      setStatus('待配置', 'idle');
-    }
+
+    // ── cfst 标签 ──
     if (st.cfst) {
       document.getElementById('cfst-label').textContent = `已安装 · ${st.cfst}`;
     }
-    if (st.subscribe_url) {
-      log(`订阅 URL（推荐）：${st.subscribe_url}`);
+
+    // ── 设置项恢复 ──
+    const autoEl = document.getElementById('auto-scan');
+    if (autoEl) autoEl.checked = !!st.auto_scan;
+    const intervalEl = document.getElementById('interval');
+    if (intervalEl && st.every_hours) {
+      intervalEl.value = `每 ${st.every_hours} 小时`;
     }
+    const modeEl = document.getElementById('scan-mode');
+    if (modeEl && st.scan_mode) {
+      modeEl.value = st.scan_mode;
+    }
+
+    // ── 配置恢复：YAML 路径 + 节点下拉 ──
+    if (st.yaml_path) {
+      window.__yamlPath = st.yaml_path;
+      log(`恢复原始 YAML：${st.yaml_path.split('/').pop()}`);
+    }
+    const sel = document.getElementById('node-select');
+    if (sel && Array.isArray(st.node_names) && st.node_names.length > 0) {
+      sel.innerHTML = '';
+      for (const name of st.node_names) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+      }
+      if (st.node_name) sel.value = st.node_name;
+    }
+
+    // ── 状态胶囊 ──
+    if (st.configured) {
+      setStatus('运行中 · 等待扫描', 'ok');
+      log(`已加载配置：节点 ${st.node_name || '(未知)'}`);
+      if (st.subscribe_url) {
+        log(`订阅 URL：${st.subscribe_url}`);
+        log('→ 在 Clash Party 选「订阅 / 导入 URL」粘贴即可');
+      }
+    } else {
+      setStatus('待配置', 'idle');
+      log('未配置 — 请先「导入 YAML」→「生成 Clash 配置」');
+    }
+
     if (st.last_status) log(`上次状态：${st.last_status}`);
   } catch (e) {
     log('GetStatus 异常：' + e);

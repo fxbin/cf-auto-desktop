@@ -11,23 +11,28 @@ import (
 
 // Prefs 用户偏好 / 状态（对应 Python prefs.json）。
 type Prefs struct {
-	Cfst        string  `json:"cfst"`
-	EveryHours  int     `json:"every_hours"`
-	AutoScan    bool    `json:"auto_scan"`
-	ScanMode    string  `json:"scan_mode"`
-	LastAttempt float64 `json:"last_attempt"`
-	LastSuccess float64 `json:"last_success"`
-	LastStatus  string  `json:"last_status"`
+	Cfst         string   `json:"cfst"`
+	EveryHours   int      `json:"every_hours"`
+	AutoScan     bool     `json:"auto_scan"`
+	ScanMode     string   `json:"scan_mode"`
+	LastAttempt  float64  `json:"last_attempt"`
+	LastSuccess  float64  `json:"last_success"`
+	LastStatus   string   `json:"last_status"`
+	LastYamlPath string   `json:"last_yaml_path,omitempty"` // 最近导入但未必已生成
+	LastNodes    []string `json:"last_nodes,omitempty"`    // 最近 YAML 的节点名
 }
 
 // State 生成配置时保存的凭据（对应 Python state.json）。
 // 含真实 UUID、SNI 域名、WebSocket 路径、Provider 随机 token。
+// 额外持久化 YamlPath / NodeNames，保证重启后 UI 可恢复。
 type State struct {
-	Node     map[string]any `json:"node"`
-	Domain   string         `json:"domain"`
-	Path     string         `json:"path"`
-	Token    string         `json:"token"`
-	NodeName string         `json:"node_name"`
+	Node      map[string]any `json:"node"`
+	Domain    string         `json:"domain"`
+	Path      string         `json:"path"`
+	Token     string         `json:"token"`
+	NodeName  string         `json:"node_name"`
+	YamlPath  string         `json:"yaml_path,omitempty"`   // 原始 Clash YAML 绝对路径
+	NodeNames []string       `json:"node_names,omitempty"`  // 该 YAML 里的可选节点名
 }
 
 // AtomicWrite 原子写文本，权限 0600（对应 Python atomic_write）。

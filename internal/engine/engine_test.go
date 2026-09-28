@@ -273,3 +273,74 @@ func TestProviderURLsShape(t *testing.T) {
 		t.Fatalf("bad config: %q", urls["config"])
 	}
 }
+
+func TestSetupPersistsYamlPathAndNodeNames(t *testing.T) {
+	wd := tempWorkdir(t)
+	src := writeSample(t, wd)
+	if _, err := Setup(wd, src, "VLESS-WS-TLS"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := LoadState(wd, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.YamlPath != src {
+		t.Fatalf("yaml_path not persisted: %q", state.YamlPath)
+	}
+	if len(state.NodeNames) == 0 {
+		t.Fatal("node_names empty")
+	}
+	found := false
+	for _, n := range state.NodeNames {
+		if n == "VLESS-WS-TLS" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("VLESS-WS-TLS not in node_names: %v", state.NodeNames)
+	}
+	if state.NodeName != "VLESS-WS-TLS" {
+		t.Fatalf("node_name = %q", state.NodeName)
+	}
+}
+
+func TestPrefsRoundTripLastYaml(t *testing.T) {
+	wd := tempWorkdir(t)
+	// 缺 prefs.json → 默认值
+	p, err := ReadPrefs(wd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ScanMode != "standard" || p.EveryHours != 6 || !p.AutoScan {
+		t.Fatalf("bad defaults: %+v", p)
+	}
+	// UpdatePrefs 局部更新
+	if err := UpdatePrefs(wd, func(p *Prefs) {
+		p.LastYamlPath = "/tmp/foo.yaml"
+		p.LastNodes = []string{"A", "B"}
+		p.ScanMode = "light"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p2, _ := ReadPrefs(wd)
+	if p2.LastYamlPath != "/tmp/foo.yaml" {
+		t.Fatalf("LastYamlPath = %q", p2.LastYamlPath)
+	}
+	if len(p2.LastNodes) != 2 {
+		t.Fatalf("LastNodes = %v", p2.LastNodes)
+	}
+	if p2.ScanMode != "light" {
+		t.Fatalf("ScanMode = %q", p2.ScanMode)
+	}
+	// 再更新其它字段，LastYamlPath 应保留
+	if err := UpdatePrefs(wd, func(p *Prefs) { p.AutoScan = false }); err != nil {
+		t.Fatal(err)
+	}
+	p3, _ := ReadPrefs(wd)
+	if p3.LastYamlPath != "/tmp/foo.yaml" {
+		t.Fatalf("LastYamlPath lost after unrelated update: %q", p3.LastYamlPath)
+	}
+	if p3.AutoScan {
+		t.Fatal("AutoScan should be false")
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"log"
 
@@ -15,6 +16,7 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+
 func main() {
 	// 单实例锁（防止 launchctl 启两个导致端口冲突）
 	unlock, err := engine.SingleInstanceLock()
@@ -24,6 +26,7 @@ func main() {
 	defer unlock()
 
 	app := NewApp()
+
 	err = wails.Run(&options.App{
 		Title:     "CF Auto Desktop",
 		Width:     900,
@@ -36,6 +39,11 @@ func main() {
 		BackgroundColour: &options.RGBA{R: 249, G: 249, B: 249, A: 255},
 		OnStartup:        app.startup,
 		OnShutdown:       app.shutdown,
+		// 关窗 → 隐藏到托盘（不退出）。真正退出走托盘菜单「退出程序」
+		OnBeforeClose: func(ctx context.Context) (prevent bool) {
+			app.HideWindow()
+			return true // prevent close
+		},
 		Bind: []interface{}{
 			app,
 		},
