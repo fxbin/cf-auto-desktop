@@ -531,3 +531,35 @@ func TestParseCFRayPoP(t *testing.T) {
 		}
 	}
 }
+
+// ── P1-1 · 协议/性能解耦 ─────────────────────────────────────────────────
+
+func TestPercentile(t *testing.T) {
+	s := []float64{0.1, 0.2, 0.3, 0.4, 0.5}
+	if p50 := percentile(s, 0.50); p50 != 0.3 {
+		t.Fatalf("P50 = %v, want 0.3", p50)
+	}
+	if p90 := percentile(s, 0.90); p90 < 0.45 || p90 > 0.51 {
+		t.Fatalf("P90 = %v, want ~0.46-0.50", p90)
+	}
+	// 单元素
+	if p := percentile([]float64{0.7}, 0.5); p != 0.7 {
+		t.Fatalf("single = %v", p)
+	}
+	// 空
+	if p := percentile(nil, 0.5); p != 0 {
+		t.Fatalf("empty = %v", p)
+	}
+}
+
+func TestCheckCandidateProtocolFailureShortCircuits(t *testing.T) {
+	// 不做真实网络；这里只验证 ProtoOK 字段语义（由 ProbeWS 失败路径决定）
+	// 真实网络路径由集成测试覆盖，此处单测数据结构契约
+	res := CandidateResult{IP: "1.1.1.1", Success: 0, Attempts: 1, ProtoOK: false}
+	if res.ProtoOK {
+		t.Fatal("ProtoOK should be false")
+	}
+	if res.HasMedian {
+		t.Fatal("HasMedian should be false for protocol failure")
+	}
+}

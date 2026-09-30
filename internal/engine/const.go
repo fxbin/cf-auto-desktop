@@ -37,8 +37,9 @@ var Seeds = []string{"172.64.153.119", "104.19.155.174"}
 var IntervalChoices = []int{3, 6, 12, 24}
 
 // ScanPreset 描述一次扫描的资源配额（对应 Python SCAN_PRESETS）。
+// PerfRepeat 是协议通过后的性能采样次数；协议本身固定 1 次探测（确定性）。
 type ScanPreset struct {
-	Repeat        int
+	PerfRepeat    int // 协议通过后再测的次数（P50/P90 样本）
 	MaxCandidates int
 	Keep          int
 	Workers       int
@@ -48,8 +49,8 @@ type ScanPreset struct {
 }
 
 var ScanPresets = map[string]ScanPreset{
-	"standard": {Repeat: 3, MaxCandidates: 30, Keep: 5, Workers: 6, CfstN: 80, CfstT: 4, CfstTL: 300},
-	"light":    {Repeat: 2, MaxCandidates: 12, Keep: 3, Workers: 3, CfstN: 30, CfstT: 3, CfstTL: 200},
+	"standard": {PerfRepeat: 3, MaxCandidates: 30, Keep: 5, Workers: 6, CfstN: 80, CfstT: 4, CfstTL: 300},
+	"light":    {PerfRepeat: 2, MaxCandidates: 12, Keep: 3, Workers: 3, CfstN: 30, CfstT: 3, CfstTL: 200},
 }
 
 // CloudflareSpeedTest 官方下载硬约束。

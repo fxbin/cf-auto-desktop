@@ -118,50 +118,95 @@ func parseCFRayPoP(cfRay string) string {
 	return strings.ToUpper(cfRay[i+1:])
 }
 
-// CandidateResult 单个 IP 的重复探活结果。
+// CandidateResult 单个 IP 的探活结果（协议 + 性能解耦）。
 type CandidateResult struct {
 	IP        string  `json:"ip"`
-	Success   int     `json:"success"`
-	Attempts  int     `json:"attempts"`
-	Median    float64 `json:"median"` // 0 表示无成功样本
+	Success   int     `json:"success"`  // 协议+性能总成功次数
+	Attempts  int     `json:"attempts"` // 总探测次数
+	Median    float64 `json:"median"`   // P50（秒），0 表示无成功样本
+	P90       float64 `json:"p90"`      // P90（秒），0 表示无成功样本
 	HasMedian bool    `json:"has_median"`
 	PoP       string  `json:"pop"` // 主要 PoP（多数成功的那一个）
+	ProtoOK   bool    `json:"proto_ok"` // 协议是否通过（TLS+WS 101）
 }
 
-// CheckCandidate 重复探活 repeat 次，聚合中位数 + PoP。
-func CheckCandidate(ip, domain, wsPath string, repeat int, stop *StopEvent) CandidateResult {
-	var ok []float64
+// CheckCandidate 协议/性能解耦探测。
+//
+//   - 协议阶段：1 次 ProbeWS 判定「TLS + WS 101 是否可用」（确定性）
+//   - 性能阶段：协议通过后，再做 perfRepeat 次测延迟（P50/P90）
+//
+// 协议失败的 IP 只花 1 次探测（不再重复 3 次浪费）。
+// perfRepeat ≤ 0 时只做协议探测，不测延迟。
+func CheckCandidate(ip, domain, wsPath string, perfRepeat int, stop *StopEvent) CandidateResult {
+	// ── 阶段 1：协议探测（1 次定生死） ──
+	attempts := 1
+	if stop.IsSet() {
+		return CandidateResult{IP: ip, Attempts: 0}
+	}
+	sec, pop, ok := ProbeWS(ip, domain, wsPath, 5*time.Second)
+	if !ok {
+		// 协议不过 → 直接返回，省下后续探测
+		return CandidateResult{IP: ip, Success: 0, Attempts: attempts, ProtoOK: false}
+	}
+	// 协议通过
+	latencies := []float64{sec}
 	popCount := map[string]int{}
-	attempts := 0
-	for i := 0; i < repeat; i++ {
+	if pop != "" {
+		popCount[pop]++
+	}
+
+	// ── 阶段 2：性能探测（perfRepeat 次测延迟） ──
+	for i := 0; i < perfRepeat; i++ {
 		if stop.IsSet() {
 			break
 		}
 		attempts++
-		if sec, pop, okv := ProbeWS(ip, domain, wsPath, 5*time.Second); okv {
-			ok = append(ok, sec)
-			if pop != "" {
-				popCount[pop]++
+		s2, p2, ok2 := ProbeWS(ip, domain, wsPath, 5*time.Second)
+		if ok2 {
+			latencies = append(latencies, s2)
+			if p2 != "" {
+				popCount[p2]++
 			}
 		}
 	}
-	res := CandidateResult{IP: ip, Success: len(ok), Attempts: attempts}
-	if len(ok) > 0 {
-		sort.Float64s(ok)
-		med := ok[len(ok)/2]
-		if len(ok)%2 == 0 {
-			med = (ok[len(ok)/2-1] + ok[len(ok)/2]) / 2
-		}
-		res.Median = math.Round(med*1000) / 1000
+
+	res := CandidateResult{
+		IP:       ip,
+		Success:  len(latencies),
+		Attempts: attempts,
+		ProtoOK:  true,
+	}
+	if len(latencies) > 0 {
+		sort.Float64s(latencies)
+		res.Median = math.Round(percentile(latencies, 0.50)*1000) / 1000
+		res.P90 = math.Round(percentile(latencies, 0.90)*1000) / 1000
 		res.HasMedian = true
 	}
 	// 主要 PoP（出现最多的那一个）
 	best, bestN := "", 0
-	for pop, n := range popCount {
+	for p, n := range popCount {
 		if n > bestN {
-			best, bestN = pop, n
+			best, bestN = p, n
 		}
 	}
 	res.PoP = best
 	return res
+}
+
+// percentile 计算排序后切片的 p 分位数（p ∈ [0,1]）。
+func percentile(sorted []float64, p float64) float64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	if len(sorted) == 1 {
+		return sorted[0]
+	}
+	idx := p * float64(len(sorted)-1)
+	lo := int(idx)
+	hi := lo + 1
+	if hi >= len(sorted) {
+		return sorted[lo]
+	}
+	frac := idx - float64(lo)
+	return sorted[lo]*(1-frac) + sorted[hi]*frac
 }

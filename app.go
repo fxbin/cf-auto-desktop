@@ -25,6 +25,8 @@ type App struct {
 	scanStop    *engine.StopEvent
 	scanRunning bool
 	scanMu      sync.Mutex
+	health      *engine.HealthProbe
+	healthMu    sync.Mutex
 }
 
 func NewApp() *App {
@@ -41,7 +43,8 @@ func (a *App) startup(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		if state, _ := engine.LoadState(wd, false); state == nil {
+		state, _ := engine.LoadState(wd, false)
+		if state == nil {
 			// 未生成过配置，不起 Provider
 			return
 		}
@@ -50,10 +53,30 @@ func (a *App) startup(ctx context.Context) {
 		} else {
 			a.emitLog(fmt.Sprintf("Provider 已启动：127.0.0.1:%d", engine.Port))
 		}
+		// 启动健康探针（每 60s 检查候选池，坏 IP 自动摘除）
+		a.startHealthProbe(wd, state)
 	}()
 }
 
+// startHealthProbe 启动后台健康探针（幂等：已存在则跳过）。
+func (a *App) startHealthProbe(wd string, state *engine.State) {
+	a.healthMu.Lock()
+	defer a.healthMu.Unlock()
+	if a.health != nil {
+		return
+	}
+	h := engine.NewHealthProbe(wd, state.Domain, state.Path, 60*time.Second, 2)
+	a.health = h
+	go h.Start(func(msg string) { a.emitLog("[健康] " + msg) })
+}
+
 func (a *App) shutdown(ctx context.Context) {
+	a.healthMu.Lock()
+	if a.health != nil {
+		a.health.Stop()
+		a.health = nil
+	}
+	a.healthMu.Unlock()
 	a.providerMu.Lock()
 	if a.provider != nil {
 		a.provider.Stop()

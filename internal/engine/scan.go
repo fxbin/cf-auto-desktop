@@ -80,10 +80,10 @@ func DoScan(workdir string, stop *StopEvent, log func(string), dryRun bool,
 		return nil, err
 	}
 	preset := ScanPresets[scanMode]
-	if preset.Repeat == 0 {
+	if preset.PerfRepeat == 0 {
 		preset = ScanPresets[prefs.ScanMode]
 	}
-	if preset.Repeat == 0 {
+	if preset.PerfRepeat == 0 {
 		preset = ScanPresets["standard"]
 	}
 
@@ -223,7 +223,7 @@ func DoScan(workdir string, stop *StopEvent, log func(string), dryRun bool,
 			if stop.IsSet() {
 				return
 			}
-			results[i] = CheckCandidate(ip, state.Domain, state.Path, preset.Repeat, stop)
+			results[i] = CheckCandidate(ip, state.Domain, state.Path, preset.PerfRepeat, stop)
 		}(i, ip)
 	}
 	wg.Wait()
@@ -234,8 +234,8 @@ func DoScan(workdir string, stop *StopEvent, log func(string), dryRun bool,
 	// 合格筛选
 	var passing []scored
 	for _, r := range results {
-		if r.Success >= max(2, preset.Repeat-1) && r.Attempts == preset.Repeat &&
-			r.HasMedian && r.Median <= 3.5 {
+		// 协议必须过；延迟 P50 ≤ 3.5s（性能门槛）
+		if r.ProtoOK && r.HasMedian && r.Median <= 3.5 {
 			passing = append(passing, scored{ip: r.IP, med: r.Median, okCnt: r.Success, pop: r.PoP})
 		}
 	}
@@ -257,7 +257,7 @@ func DoScan(workdir string, stop *StopEvent, log func(string), dryRun bool,
 		if i >= 10 {
 			break
 		}
-		log(fmt.Sprintf("%s  握手 ok · 中位数 %.3fs · PoP=%s", s.ip, s.med, orDash(s.pop)))
+		log(fmt.Sprintf("%s  握手 ok · P50 %.3fs · PoP=%s", s.ip, s.med, orDash(s.pop)))
 	}
 
 	report := &ScanReport{
