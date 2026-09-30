@@ -293,6 +293,8 @@ func GenerateMain(config map[string]any, state *State) (map[string]any, error) {
 	}
 
 	// 追加动态策略组
+	// Fallback 组：候选池优先，原始节点作最终兜底（候选全挂时不断网）。
+	// Mihomo 的 fallback 顺序：use 拉的代理在前，proxies 列的在后。
 	groupsRaw = append(groupsRaw,
 		map[string]any{
 			"name": Auto, "type": "url-test", "use": []any{Provider},
@@ -300,8 +302,10 @@ func GenerateMain(config map[string]any, state *State) (map[string]any, error) {
 			"tolerance": 100, "timeout": 6000, "lazy": false,
 		},
 		map[string]any{
-			"name": Fallback, "type": "fallback", "use": []any{Provider},
-			"url": "https://www.gstatic.com/generate_204", "interval": 300,
+			"name": Fallback, "type": "fallback",
+			"use":     []any{Provider},
+			"proxies": []any{state.NodeName}, // ← 兜底：原始 VLESS 节点
+			"url":     "https://www.gstatic.com/generate_204", "interval": 300,
 			"timeout": 6000, "lazy": false,
 		},
 	)
@@ -385,35 +389,53 @@ func Setup(workdir, configFile, nodeName string) (string, error) {
 		return "", err
 	}
 
-	// 保留旧候选池仅当 domain/path/node 未变；否则重建种子
+	// 候选池复用策略（放宽）：
+	//   - domain + path 相同 → 复用旧 IP 列表，用新 node 模板重新派生
+	//     （UUID 轮换 / 节点改名时不再丢候选；cf-proxies.yaml 里的 UUID 立刻更新）
+	//   - domain 或 path 变化 → 重建为 Seeds（旧 IP 对新域名证书不可信）
 	priorPath := filepath.Join(workdir, "cf-proxies.yaml")
-	unchanged := false
+	canReuseIPs := false
+	var oldIPs []string
 	if prev != nil && prev.Domain == state.Domain && prev.Path == state.Path {
-		if eq, _ := yaml.Marshal(prev.Node); eq != nil {
-			if eq2, _ := yaml.Marshal(state.Node); eq2 != nil {
-				unchanged = string(eq) == string(eq2)
+		canReuseIPs = true
+		if data, err := LoadYAML(priorPath); err == nil {
+			if proxies, ok := data["proxies"].([]any); ok {
+				for _, it := range proxies {
+					if pm, ok := it.(map[string]any); ok {
+						if ip := fmt.Sprint(pm["server"]); IPv4(ip) {
+							oldIPs = append(oldIPs, ip)
+						}
+					}
+				}
 			}
 		}
 	}
-	if _, err := os.Stat(priorPath); err != nil || !unchanged {
-		prov, err := GenerateProvider(state, Seeds)
-		if err != nil {
-			return "", err
-		}
-		text, err := YDump(prov)
-		if err != nil {
-			return "", err
-		}
-		if err := AtomicWrite(priorPath, text); err != nil {
-			return "", err
-		}
+	// GenerateProvider 要求 1–5 个不重复 IPv4；越界则退回 Seeds
+	if len(oldIPs) > 5 {
+		oldIPs = oldIPs[:5]
 	}
-
-	text, err := YDump(main)
+	ips := Seeds
+	if canReuseIPs && len(oldIPs) >= 1 {
+		ips = oldIPs
+	}
+	// 始终重写（确保 UUID/SNI 反映最新 node 模板）
+	prov, err := GenerateProvider(state, ips)
 	if err != nil {
 		return "", err
 	}
-	if err := AtomicWrite(mainPath, text); err != nil {
+	text, derr := YDump(prov)
+	if derr != nil {
+		return "", derr
+	}
+	if err := AtomicWrite(priorPath, text); err != nil {
+		return "", err
+	}
+
+	mainText, merr := YDump(main)
+	if merr != nil {
+		return "", merr
+	}
+	if err := AtomicWrite(mainPath, mainText); err != nil {
 		return "", err
 	}
 	return mainPath, nil

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -342,5 +343,191 @@ func TestPrefsRoundTripLastYaml(t *testing.T) {
 	}
 	if p3.AutoScan {
 		t.Fatal("AutoScan should be false")
+	}
+}
+
+// ── T17 · 候选池复用（放宽到 domain+path） ─────────────────────────────────
+
+func TestSetupReusesIPsWhenDomainPathUnchanged(t *testing.T) {
+	wd := tempWorkdir(t)
+	src := writeSample(t, wd)
+	if _, err := Setup(wd, src, "VLESS-WS-TLS"); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟扫描后候选池含 3 个 IP
+	state, _ := LoadState(wd, true)
+	prov, _ := GenerateProvider(state, []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"})
+	text, _ := YDump(prov)
+	if err := AtomicWrite(filepath.Join(wd, "cf-proxies.yaml"), text); err != nil {
+		t.Fatal(err)
+	}
+
+	// 轮换 UUID（node 变了，但 domain/path 不变）→ 应复用 IP
+	rotated := strings.Replace(sampleNodeYAML,
+		"uuid: 123e4567-e89b-42d3-a456-426614174000",
+		"uuid: 999e4567-e89b-42d3-a456-426614174999", 1)
+	src2 := filepath.Join(wd, "rotated.yaml")
+	if err := os.WriteFile(src2, []byte(rotated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Setup(wd, src2, "VLESS-WS-TLS"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 验证：IP 应保留，但 UUID 已换成新的
+	cfg, err := LoadYAML(filepath.Join(wd, "cf-proxies.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxies := cfg["proxies"].([]any)
+	if len(proxies) != 3 {
+		t.Fatalf("want 3 proxies (IPs reused), got %d", len(proxies))
+	}
+	ips := map[string]bool{}
+	for _, p := range proxies {
+		pm := p.(map[string]any)
+		ips[fmt.Sprint(pm["server"])] = true
+		if fmt.Sprint(pm["uuid"]) != "999e4567-e89b-42d3-a456-426614174999" {
+			t.Fatalf("uuid not rotated: %v", pm["uuid"])
+		}
+	}
+	for _, want := range []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"} {
+		if !ips[want] {
+			t.Fatalf("IP %s lost after UUID rotation", want)
+		}
+	}
+}
+
+func TestSetupResetsIPsWhenDomainChanges(t *testing.T) {
+	wd := tempWorkdir(t)
+	src := writeSample(t, wd)
+	if _, err := Setup(wd, src, "VLESS-WS-TLS"); err != nil {
+		t.Fatal(err)
+	}
+	// 换域名 → 旧 IP 不可信，应回 Seeds
+	other := strings.ReplaceAll(sampleNodeYAML, "v2.example.com", "other.example.com")
+	src2 := filepath.Join(wd, "other.yaml")
+	if err := os.WriteFile(src2, []byte(other), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 新域名下原节点名不变，直接 Setup
+	if _, err := Setup(wd, src2, "VLESS-WS-TLS"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := LoadYAML(filepath.Join(wd, "cf-proxies.yaml"))
+	proxies := cfg["proxies"].([]any)
+	if len(proxies) != len(Seeds) {
+		t.Fatalf("want %d seeds after domain change, got %d", len(Seeds), len(proxies))
+	}
+	for _, p := range proxies {
+		pm := p.(map[string]any)
+		if fmt.Sprint(pm["servername"]) != "other.example.com" {
+			t.Fatalf("servername = %v", pm["servername"])
+		}
+	}
+}
+
+// ── P0-1 · fallback 组兜底 ───────────────────────────────────────────────
+
+func TestFallbackGroupHasOriginalNodeAsFallback(t *testing.T) {
+	wd := tempWorkdir(t)
+	src := writeSample(t, wd)
+	out, err := Setup(wd, src, "VLESS-WS-TLS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadYAML(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups, _ := cfg["proxy-groups"].([]any)
+	var fallback map[string]any
+	for _, g := range groups {
+		gm, _ := g.(map[string]any)
+		if fmt.Sprint(gm["name"]) == Fallback {
+			fallback = gm
+			break
+		}
+	}
+	if fallback == nil {
+		t.Fatal("fallback group missing")
+	}
+	if fmt.Sprint(fallback["type"]) != "fallback" {
+		t.Fatalf("type = %v", fallback["type"])
+	}
+	// use 必须含 Provider
+	use, _ := fallback["use"].([]any)
+	foundProvider := false
+	for _, u := range use {
+		if fmt.Sprint(u) == Provider {
+			foundProvider = true
+		}
+	}
+	if !foundProvider {
+		t.Fatalf("use should contain %s, got %v", Provider, use)
+	}
+	// proxies 必须含原始节点名（兜底）
+	proxies, _ := fallback["proxies"].([]any)
+	foundNode := false
+	for _, p := range proxies {
+		if fmt.Sprint(p) == "VLESS-WS-TLS" {
+			foundNode = true
+		}
+	}
+	if !foundNode {
+		t.Fatalf("proxies should contain VLESS-WS-TLS as fallback, got %v", proxies)
+	}
+}
+
+// ── P0-2 · PoP 聚类 ─────────────────────────────────────────────────────
+
+func TestClusterByPoP(t *testing.T) {
+	items := []scored{
+		{ip: "1.1.1.1", med: 0.1, okCnt: 3, pop: "HKG"},
+		{ip: "1.1.1.2", med: 0.2, okCnt: 3, pop: "HKG"},
+		{ip: "1.1.1.3", med: 0.3, okCnt: 3, pop: "HKG"}, // 第三个 HKG，应丢
+		{ip: "2.2.2.1", med: 0.4, okCnt: 3, pop: "NRT"},
+		{ip: "2.2.2.2", med: 0.5, okCnt: 3, pop: "NRT"},
+		{ip: "3.3.3.1", med: 0.6, okCnt: 3, pop: "SJC"},
+		{ip: "4.4.4.1", med: 0.7, okCnt: 3, pop: ""}, // unknown
+	}
+	got := clusterByPoP(items, 5, 2)
+	want := []string{"1.1.1.1", "1.1.1.2", "2.2.2.1", "2.2.2.2", "3.3.3.1"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("idx %d: got %s, want %s", i, got[i], want[i])
+		}
+	}
+}
+
+func TestClusterByPoPLimitsPerPoP(t *testing.T) {
+	items := []scored{
+		{ip: "1.1.1.1", med: 0.1, okCnt: 3, pop: "HKG"},
+		{ip: "1.1.1.2", med: 0.2, okCnt: 3, pop: "HKG"},
+		{ip: "1.1.1.3", med: 0.3, okCnt: 3, pop: "HKG"},
+		{ip: "1.1.1.4", med: 0.4, okCnt: 3, pop: "HKG"},
+	}
+	got := clusterByPoP(items, 10, 1) // 每 PoP 只 1 个
+	if len(got) != 1 || got[0] != "1.1.1.1" {
+		t.Fatalf("got %v, want [1.1.1.1]", got)
+	}
+}
+
+func TestParseCFRayPoP(t *testing.T) {
+	cases := map[string]string{
+		"7a1b2c3d4e5f6789-HKG": "HKG",
+		"abc-NRT":              "NRT",
+		"abc-sjc":              "SJC", // 小写→大写
+		"no-dash-here":         "HERE", // 最后一段
+		"":                     "",
+		"nodash":               "",
+	}
+	for in, want := range cases {
+		if got := parseCFRayPoP(in); got != want {
+			t.Fatalf("parseCFRayPoP(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -20,6 +20,14 @@ type ScanReport struct {
 	Measure    string   `json:"measure"`
 }
 
+// scored 单个候选 IP 的评分（供 clusterByPoP 用）。
+type scored struct {
+	ip    string
+	med   float64
+	okCnt int
+	pop   string
+}
+
 // CSVIps 从 result.csv 读前 limit 个去重 IPv4。
 func CSVIps(csvFile string, limit int) ([]string, error) {
 	f, err := os.Open(csvFile)
@@ -224,16 +232,11 @@ func DoScan(workdir string, stop *StopEvent, log func(string), dryRun bool,
 	}
 
 	// 合格筛选
-	type scored struct {
-		ip    string
-		med   float64
-		okCnt int
-	}
 	var passing []scored
 	for _, r := range results {
 		if r.Success >= max(2, preset.Repeat-1) && r.Attempts == preset.Repeat &&
 			r.HasMedian && r.Median <= 3.5 {
-			passing = append(passing, scored{ip: r.IP, med: r.Median, okCnt: r.Success})
+			passing = append(passing, scored{ip: r.IP, med: r.Median, okCnt: r.Success, pop: r.PoP})
 		}
 	}
 	sort.Slice(passing, func(i, j int) bool {
@@ -242,13 +245,10 @@ func DoScan(workdir string, stop *StopEvent, log func(string), dryRun bool,
 		}
 		return passing[i].med < passing[j].med
 	})
-	var chosen []string
-	for i, s := range passing {
-		if i >= preset.Keep {
-			break
-		}
-		chosen = append(chosen, s.ip)
-	}
+
+	// PoP 聚类选取：每个 PoP 最多保留 2 个 IP，优先保证拓扑多样性。
+	// 5 个 IP 若同 PoP 等于 1 个；跨 PoP 才有真正的容灾价值。
+	chosen := clusterByPoP(passing, preset.Keep, 2)
 
 	// 日志前 10 快的
 	printable := append([]scored{}, passing...)
@@ -257,7 +257,7 @@ func DoScan(workdir string, stop *StopEvent, log func(string), dryRun bool,
 		if i >= 10 {
 			break
 		}
-		log(fmt.Sprintf("%s  握手 ok · 中位数 %.3fs", s.ip, s.med))
+		log(fmt.Sprintf("%s  握手 ok · 中位数 %.3fs · PoP=%s", s.ip, s.med, orDash(s.pop)))
 	}
 
 	report := &ScanReport{
@@ -309,4 +309,37 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// clusterByPoP 按 PoP 聚类选取候选 IP。
+// 输入已按 (okCnt desc, med asc) 排好序；输出最多 maxTotal 个，
+// 每个 PoP 最多 perPoP 个。PoP 为空的候选视为独立组（"unknown"）。
+func clusterByPoP(items []scored, maxTotal, perPoP int) []string {
+	if maxTotal <= 0 {
+		return nil
+	}
+	poPCount := map[string]int{}
+	var out []string
+	for _, it := range items {
+		if len(out) >= maxTotal {
+			break
+		}
+		key := it.pop
+		if key == "" {
+			key = "unknown"
+		}
+		if poPCount[key] >= perPoP {
+			continue
+		}
+		poPCount[key]++
+		out = append(out, it.ip)
+	}
+	return out
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
