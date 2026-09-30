@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 
 	"cf-auto-go/internal/engine"
 
@@ -31,6 +33,24 @@ func NewApp() *App {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	// 自动拉起 Provider：只要 state.json 存在（说明生成过配置），
+	// 就让 HTTP Provider 监听 127.0.0.1:17653，供 Clash 每 60s 拉取。
+	// 失败只记日志不阻断启动（可能端口被旧实例占用等）。
+	go func() {
+		wd, err := a.workdir()
+		if err != nil {
+			return
+		}
+		if state, _ := engine.LoadState(wd, false); state == nil {
+			// 未生成过配置，不起 Provider
+			return
+		}
+		if err := a.ensureProvider(); err != nil {
+			a.emitLog("Provider 启动失败：" + err.Error() + "（检查是否旧实例占用 17653）")
+		} else {
+			a.emitLog(fmt.Sprintf("Provider 已启动：127.0.0.1:%d", engine.Port))
+		}
+	}()
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -268,6 +288,39 @@ func (a *App) ensureProvider() error {
 	}
 	a.provider = p
 	return nil
+}
+
+// StartProvider 手动启动 HTTP Provider（前端可在检测到未监听时调用）。
+func (a *App) StartProvider() (map[string]any, error) {
+	if err := a.ensureProvider(); err != nil {
+		return nil, err
+	}
+	urls, _ := engine.ProviderURLs(mustWorkdir())
+	out := map[string]any{"ok": true}
+	if urls != nil {
+		out["url"] = urls
+	}
+	return out, nil
+}
+
+// ProviderStatus 查询 Provider 是否在监听。
+func (a *App) ProviderStatus() map[string]any {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", engine.Port), 200*time.Millisecond)
+	if err != nil {
+		return map[string]any{"listening": false}
+	}
+	_ = conn.Close()
+	urls, _ := engine.ProviderURLs(mustWorkdir())
+	out := map[string]any{"listening": true}
+	if urls != nil {
+		out["url"] = urls
+	}
+	return out
+}
+
+func mustWorkdir() string {
+	wd, _ := engine.AppHome()
+	return wd
 }
 
 // ── cfst 下载 / 导入 ─────────────────────────────────────────────────────
