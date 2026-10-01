@@ -1,5 +1,7 @@
 # CF Auto Desktop
 
+[![CI](https://github.com/fxbin/cf-auto-desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/fxbin/cf-auto-desktop/actions/workflows/ci.yml)
+
 macOS 菜单栏小工具：对你自己的 Clash / Mihomo 本地配置做 Cloudflare 接入 IP 动态优选。只替换候选 IP，不动你的节点本身。
 
 > **技术栈**：Go 1.22+ · Wails v2（WKWebView）· 前端原生 HTML/CSS/JS

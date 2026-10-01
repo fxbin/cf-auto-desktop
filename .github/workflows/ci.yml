@@ -1,0 +1,212 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一 commit 只跑最新一次，旧的自动取消
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.22"
+  WAILS_VERSION: "v2.11.0"
+  GOPROXY: https://goproxy.cn,direct
+  GOSUMDB: "off"
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1 · 测试（快速反馈）
+  # ─────────────────────────────────────────────────────────────────────────
+  test:
+    name: Go 测试
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go test
+        run: go test -race -count=1 ./...
+
+      - name: Test summary
+        if: always()
+        run: |
+          echo "## Go 测试结果" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 触发：\`${{ github.event_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit：\`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Go：\`${{ env.GO_VERSION }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2 · 构建（macOS .app）
+  # ─────────────────────────────────────────────────────────────────────────
+  build:
+    name: Wails 构建
+    runs-on: macos-latest
+    needs: test
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Cache Wails CLI
+        id: cache-wails
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin/wails
+          key: wails-cli-${{ env.WAILS_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install Wails CLI
+        if: steps.cache-wails.outputs.cache-hit != 'true'
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
+      - name: Add Wails to PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Wails
+        run: wails version
+
+      - name: Build .app (darwin/arm64)
+        run: wails build -platform darwin/arm64 -clean
+
+      - name: Check bundle size
+        id: bundle
+        run: |
+          APP="build/bin/CF Auto Desktop.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::未生成 .app"
+            exit 1
+          fi
+          SIZE=$(du -sm "$APP" | awk '{print $1}')
+          echo "size_mb=${SIZE}" >> "$GITHUB_OUTPUT"
+          echo "## 构建产物" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`.app\` 体积：**${SIZE} MB**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 路径：\`build/bin/CF Auto Desktop.app\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SIZE" -gt 30 ]; then
+            echo "::warning::体积超过 30 MB 阈值，请检查是否误入 Qt/无用 framework"
+          fi
+
+      - name: Upload .app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CF-Auto-Desktop-macos-arm64
+          path: build/bin/CF Auto Desktop.app
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: List bundle contents
+        run: |
+          echo "## Bundle 结构" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          find "build/bin/CF Auto Desktop.app/Contents" -maxdepth 3 -type d | head -20 >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3 · 全架构构建（仅 main push，供分发）
+  # ─────────────────────────────────────────────────────────────────────────
+  build-universal:
+    name: Wails 构建（universal）
+    runs-on: macos-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Cache Wails CLI
+        id: cache-wails
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin/wails
+          key: wails-cli-${{ env.WAILS_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install Wails CLI
+        if: steps.cache-wails.outputs.cache-hit != 'true'
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
+      - name: Add Wails to PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Build .app (darwin/universal)
+        run: wails build -platform darwin/universal -clean
+
+      - name: Upload universal .app
+        uses: actions/upload-artifact@v4
+        with:
+          name: CF-Auto-Desktop-macos-universal
+          path: build/bin/CF Auto Desktop.app
+          retention-days: 30
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 4 · 安全扫描（push 时，不阻断）
+  # ─────────────────────────────────────────────────────────────────────────
+  secret-scan:
+    name: 敏感串扫描
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 全历史扫描
+
+      - name: Scan for leaked secrets
+        run: |
+          set +e
+          echo "## 敏感串扫描" >> "$GITHUB_STEP_SUMMARY"
+          HITS=0
+
+          # 1) 真实域名 / 服务商
+          if git log --all -p | grep -iE '^\+.*v2\.apev|^\+.*\.apev\.' > /tmp/hits1.txt; then
+            echo "⚠️ 命中真实域名：" >> "$GITHUB_STEP_SUMMARY"
+            head -5 /tmp/hits1.txt >> "$GITHUB_STEP_SUMMARY"
+            HITS=$((HITS+1))
+          fi
+
+          # 2) 绝对路径 / 用户名
+          if git log --all -p | grep -iE '^\+/Users/[a-z]+|^\+/home/[a-z]+' > /tmp/hits2.txt; then
+            echo "⚠️ 命中绝对路径：" >> "$GITHUB_STEP_SUMMARY"
+            head -5 /tmp/hits2.txt >> "$GITHUB_STEP_SUMMARY"
+            HITS=$((HITS+1))
+          fi
+
+          # 3) 私钥 / token 形态（排除公开 RFC GUID）
+          if git log --all -p | grep -iE '^\+.*ghp_[A-Za-z0-9]{20,}|^\+.*gho_[A-Za-z0-9]{20,}|^\+.*-----BEGIN.*PRIVATE KEY' > /tmp/hits3.txt; then
+            echo "⚠️ 命中 token / 私钥：" >> "$GITHUB_STEP_SUMMARY"
+            head -5 /tmp/hits3.txt >> "$GITHUB_STEP_SUMMARY"
+            HITS=$((HITS+1))
+          fi
+
+          if [ "$HITS" -eq 0 ]; then
+            echo "✅ 未发现敏感串（域名 / 路径 / token / 私钥）" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::发现 $HITS 类敏感串，检查 $GITHUB_STEP_SUMMARY"
+          fi
+          exit 0  # 不阻断 CI
