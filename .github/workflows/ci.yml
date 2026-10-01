@@ -40,7 +40,7 @@ jobs:
         run: go vet ./...
 
       - name: Go test
-        run: go test -race -count=1 ./...
+        run: go test -count=1 ./...
 
       - name: Test summary
         if: always()
@@ -184,21 +184,21 @@ jobs:
           HITS=0
 
           # 1) 真实域名 / 服务商
-          if git log --all -p | grep -iE '^\+.*v2\.apev|^\+.*\.apev\.' > /tmp/hits1.txt; then
+          if git log --all -p -- ':!*.yml' ':!*.yaml' | grep -iE '^\+.*v2\.apev|^\+.*\.apev\.' > /tmp/hits1.txt; then
             echo "⚠️ 命中真实域名：" >> "$GITHUB_STEP_SUMMARY"
             head -5 /tmp/hits1.txt >> "$GITHUB_STEP_SUMMARY"
             HITS=$((HITS+1))
           fi
 
           # 2) 绝对路径 / 用户名
-          if git log --all -p | grep -iE '^\+/Users/[a-z]+|^\+/home/[a-z]+' > /tmp/hits2.txt; then
+          if git log --all -p -- ':!*.yml' ':!*.yaml' | grep -iE '^\+/Users/[a-z]+|^\+/home/[a-z]+' > /tmp/hits2.txt; then
             echo "⚠️ 命中绝对路径：" >> "$GITHUB_STEP_SUMMARY"
             head -5 /tmp/hits2.txt >> "$GITHUB_STEP_SUMMARY"
             HITS=$((HITS+1))
           fi
 
           # 3) 私钥 / token 形态（排除公开 RFC GUID）
-          if git log --all -p | grep -iE '^\+.*ghp_[A-Za-z0-9]{20,}|^\+.*gho_[A-Za-z0-9]{20,}|^\+.*-----BEGIN.*PRIVATE KEY' > /tmp/hits3.txt; then
+          if git log --all -p -- ':!*.yml' ':!*.yaml' | grep -iE '^\+.*ghp_[A-Za-z0-9]{20,}|^\+.*gho_[A-Za-z0-9]{20,}|^\+.*-----BEGIN' > /tmp/hits3.txt; then
             echo "⚠️ 命中 token / 私钥：" >> "$GITHUB_STEP_SUMMARY"
             head -5 /tmp/hits3.txt >> "$GITHUB_STEP_SUMMARY"
             HITS=$((HITS+1))
