@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.22"
+  GO_VERSION: "1.23"
   WAILS_VERSION: "v2.11.0"
   GOPROXY: https://goproxy.cn,direct
   GOSUMDB: "off"
@@ -37,10 +37,10 @@ jobs:
           cache: true
 
       - name: Go vet
-        run: go vet ./...
+        run: CGO_ENABLED=0 go vet ./...
 
       - name: Go test
-        run: go test -count=1 ./...
+        run: CGO_ENABLED=0 go test -count=1 ./...
 
       - name: Test summary
         if: always()
