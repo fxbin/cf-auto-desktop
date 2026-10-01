@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const sampleNodeYAML = `
@@ -561,5 +562,156 @@ func TestCheckCandidateProtocolFailureShortCircuits(t *testing.T) {
 	}
 	if res.HasMedian {
 		t.Fatal("HasMedian should be false for protocol failure")
+	}
+}
+
+// ── P2-1 · Mihomo 被动反馈 ───────────────────────────────────────────────
+
+func TestBoostScore(t *testing.T) {
+	cases := []struct {
+		delayMs, sampleN int
+		want             float64
+	}{
+		{0, 0, 0.5},     // 无数据 → 中性
+		{100, 0, 0.5},   // 无样本 → 中性
+		{30, 5, 1.0},    // 快
+		{80, 5, 0.9},
+		{150, 5, 0.7},
+		{250, 5, 0.5},
+		{400, 5, 0.3},
+		{600, 5, 0.1},   // 慢
+	}
+	for _, c := range cases {
+		got := BoostScore(c.delayMs, c.sampleN)
+		if got != c.want {
+			t.Fatalf("BoostScore(%d,%d) = %v, want %v", c.delayMs, c.sampleN, got, c.want)
+		}
+	}
+}
+
+func TestFetchControllerConfig(t *testing.T) {
+	yaml := []byte(`
+external-controller: 127.0.0.1:9090
+secret: my-secret-token
+other: value
+`)
+	baseURL, secret := FetchControllerConfig(yaml)
+	if baseURL != "http://127.0.0.1:9090" {
+		t.Fatalf("baseURL = %q", baseURL)
+	}
+	if secret != "my-secret-token" {
+		t.Fatalf("secret = %q", secret)
+	}
+	// 无 secret
+	yaml2 := []byte("external-controller: 127.0.0.1:9097\n")
+	baseURL2, secret2 := FetchControllerConfig(yaml2)
+	if baseURL2 != "http://127.0.0.1:9097" {
+		t.Fatalf("baseURL2 = %q", baseURL2)
+	}
+	if secret2 != "" {
+		t.Fatalf("secret2 = %q", secret2)
+	}
+}
+
+func TestMihomoClientRejectsNonLoopback(t *testing.T) {
+	c := NewMihomoClient()
+	c.BaseURL = "http://evil.com:9090"
+	got := c.FetchDelays()
+	if len(got) != 0 {
+		t.Fatal("non-loopback must return empty")
+	}
+}
+
+func TestFormatDelayMs(t *testing.T) {
+	if FormatDelayMs(0) != "-" {
+		t.Fatal("0 should be -")
+	}
+	if FormatDelayMs(120) != "120ms" {
+		t.Fatal("120ms")
+	}
+	if FormatDelayMs(1500) != "1.50s" {
+		t.Fatal("1.50s")
+	}
+}
+
+// ── P2-2 · 候选 TTL / 时间衰减 ───────────────────────────────────────────
+
+func TestTimeDecayFactor(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		age    time.Duration
+		want   float64
+	}{
+		{0, 1.0},                    // 刚验证
+		{30 * time.Minute, 1.0},
+		{2 * time.Hour, 0.85},
+		{8 * time.Hour, 0.7},
+		{18 * time.Hour, 0.5},
+		{48 * time.Hour, 0.3},       // 过期 → 下限
+	}
+	for _, c := range cases {
+		ts := now.Add(-c.age).Unix()
+		got := TimeDecayFactor(ts)
+		if got != c.want {
+			t.Fatalf("age=%v: got %v, want %v", c.age, got, c.want)
+		}
+	}
+	// 从未验证
+	if got := TimeDecayFactor(0); got != 0.3 {
+		t.Fatalf("never-validated = %v, want 0.3", got)
+	}
+}
+
+func TestEffectiveScore(t *testing.T) {
+	// 几何平均
+	if got := EffectiveScore(1.0, 1.0); got != 1.0 {
+		t.Fatalf("boost=1 decay=1 → %v", got)
+	}
+	if got := EffectiveScore(0.5, 0.5); got < 0.4 || got > 0.6 {
+		t.Fatalf("boost=0.5 decay=0.5 → %v, want ~0.5", got)
+	}
+	// 零值安全
+	if got := EffectiveScore(0, 0); got <= 0 {
+		t.Fatalf("zero → %v", got)
+	}
+}
+
+func TestCandidateMetaRoundTrip(t *testing.T) {
+	wd := tempWorkdir(t)
+	m := LoadCandidateMeta(wd)
+	if len(m) != 0 {
+		t.Fatal("should start empty")
+	}
+	UpdateMetaFromProbe(wd, "1.1.1.1", true, 80)
+	UpdateMetaFromProbe(wd, "1.1.1.1", true, 90)
+	UpdateMetaFromProbe(wd, "8.8.8.8", false, 0)
+
+	m2 := LoadCandidateMeta(wd)
+	if len(m2) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(m2))
+	}
+	e1 := m2["1.1.1.1"]
+	if e1.FailCount != 0 || !e1.LastProbeOK || e1.LastMihomoMs != 90 {
+		t.Fatalf("1.1.1.1 meta wrong: %+v", e1)
+	}
+	if e1.LastValidated == 0 {
+		t.Fatal("LastValidated should be set")
+	}
+	e2 := m2["8.8.8.8"]
+	if e2.FailCount != 1 || e2.LastProbeOK {
+		t.Fatalf("8.8.8.8 meta wrong: %+v", e2)
+	}
+	// 时间衰减
+	if got := TimeDecayFactor(e1.LastValidated); got != 1.0 {
+		t.Fatalf("just validated decay = %v", got)
+	}
+}
+
+func TestFormatMetaAge(t *testing.T) {
+	if FormatMetaAge(0) != "从未验证" {
+		t.Fatal("0")
+	}
+	if FormatMetaAge(time.Now().Unix()) != "刚刚" {
+		t.Fatal("now")
 	}
 }

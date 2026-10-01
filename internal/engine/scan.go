@@ -21,11 +21,13 @@ type ScanReport struct {
 }
 
 // scored 单个候选 IP 的评分（供 clusterByPoP 用）。
+// boost 是 Mihomo 被动延迟折算的加权（0–1，0.5 = 中性）。
 type scored struct {
 	ip    string
 	med   float64
 	okCnt int
 	pop   string
+	boost float64
 }
 
 // CSVIps 从 result.csv 读前 limit 个去重 IPv4。
@@ -231,15 +233,70 @@ func DoScan(workdir string, stop *StopEvent, log func(string), dryRun bool,
 		return nil, fmt.Errorf("已取消扫描，原节点池不变")
 	}
 
-	// 合格筛选
+	// 被动信号：Mihomo 观测延迟（API 不可用时为空 map，boost 全 0.5 中性）
+	var mihomoDelays map[string]MihomoDelay
+	if data, err := os.ReadFile(filepath.Join(workdir, "clash-auto.yaml")); err == nil {
+		baseURL, secret := FetchControllerConfig(data)
+		if baseURL != "" {
+			mc := NewMihomoClient()
+			mc.BaseURL = baseURL
+			mc.Secret = secret
+			mihomoDelays = mc.FetchDelays()
+			if len(mihomoDelays) > 0 {
+				log(fmt.Sprintf("Mihomo 被动延迟反馈：%d 个节点", len(mihomoDelays)))
+			}
+		}
+	}
+	// IP → 主动探测结果，用于给 Mihomo 名称（CF-DYN-XX）反查 IP
+	ipToName := map[string]string{}
+	if provData, err := LoadYAML(filepath.Join(workdir, "cf-proxies.yaml")); err == nil {
+		if proxies, ok := provData["proxies"].([]any); ok {
+			for _, it := range proxies {
+				if pm, ok := it.(map[string]any); ok {
+					ipToName[fmt.Sprint(pm["server"])] = fmt.Sprint(pm["name"])
+				}
+			}
+		}
+	}
+
+	// 先把主动探测结果写入元数据（时间衰减的基础）
+	for _, r := range results {
+		mihomoMs := 0
+		if name, ok := ipToName[r.IP]; ok {
+			if d, ok := mihomoDelays[name]; ok {
+				mihomoMs = d.DelayMs
+			}
+		}
+		UpdateMetaFromProbe(workdir, r.IP, r.ProtoOK, mihomoMs)
+	}
+
+	// 加载候选元数据（TTL / 时间衰减）
+	metaMap := LoadCandidateMeta(workdir)
+
+	// 合格筛选 + Mihomo 被动加权 + 时间衰减
 	var passing []scored
 	for _, r := range results {
 		// 协议必须过；延迟 P50 ≤ 3.5s（性能门槛）
 		if r.ProtoOK && r.HasMedian && r.Median <= 3.5 {
-			passing = append(passing, scored{ip: r.IP, med: r.Median, okCnt: r.Success, pop: r.PoP})
+			boost := 0.5 // 中性
+			if name, ok := ipToName[r.IP]; ok {
+				if d, ok := mihomoDelays[name]; ok {
+					boost = BoostScore(d.DelayMs, d.SampleN)
+				}
+			}
+			decay := TimeDecayFactor(metaMap[r.IP].LastValidated)
+			eff := EffectiveScore(boost, decay)
+			passing = append(passing, scored{
+				ip: r.IP, med: r.Median, okCnt: r.Success,
+				pop: r.PoP, boost: eff, // boost 字段复用为综合分
+			})
 		}
 	}
+	// 排序：综合分（Mihomo × 时间衰减）优先，其次 okCnt，最后主动延迟
 	sort.Slice(passing, func(i, j int) bool {
+		if passing[i].boost != passing[j].boost {
+			return passing[i].boost > passing[j].boost
+		}
 		if passing[i].okCnt != passing[j].okCnt {
 			return passing[i].okCnt > passing[j].okCnt
 		}
